@@ -201,6 +201,7 @@ class ProjectSettings:
         "loop_interval_seconds":         (60,      "int",    "Seconds between scan->execute cycles for this project (overrides global)"),
         "order_time_in_force":           ("day",   "string", "Default time-in-force for submitted orders"),
         "use_extended_hours":            (False,   "bool",   "Allow trades during extended hours"),
+        "income_cadence":                ("custom","string", "Income cadence preset: weekly | biweekly | monthly | custom. When set to a preset, the strategist overrides csp_min_dte / csp_max_dte / csp_delta_min / csp_delta_max with the preset values, and auto-roll will roll any open contract whose remaining DTE drifts outside the preset band."),
         "dry_run":                       (True,    "bool",   "If true, skip order submission and only log decisions"),
     }
 
@@ -267,3 +268,45 @@ class ProjectSettings:
                 description=desc, is_secret=False,
             ))
         return out
+
+
+
+# ----------------- Cadence presets -----------------------------------------
+# When `income_cadence` is set to a preset (not 'custom'), the strategist
+# uses these values instead of the stored csp_min_dte / csp_max_dte /
+# csp_delta_min / csp_delta_max.
+#
+# delta ranges trade off "how aggressive" vs "how often assigned":
+#   - higher delta => fatter premium but higher assignment probability
+#   - lower delta  => safer but smaller premium per cycle
+CADENCE_PRESETS: dict[str, dict[str, Any]] = {
+    "weekly":   {"min_dte": 5,  "max_dte": 10, "delta_min": 0.20, "delta_max": 0.30},
+    "biweekly": {"min_dte": 12, "max_dte": 18, "delta_min": 0.25, "delta_max": 0.35},
+    "monthly":  {"min_dte": 25, "max_dte": 35, "delta_min": 0.25, "delta_max": 0.40},
+}
+
+
+def effective_csp_band(project_id: str) -> dict[str, Any]:
+    """Return {min_dte, max_dte, delta_min, delta_max, cadence} for CSPs.
+
+    If `income_cadence` is set to a known preset, the preset wins.
+    Otherwise the stored csp_* settings (or their defaults) are returned.
+    """
+    cadence = str(ProjectSettings.get(project_id, "income_cadence",
+                                      default="custom") or "custom").lower()
+    if cadence in CADENCE_PRESETS:
+        p = CADENCE_PRESETS[cadence]
+        return {
+            "min_dte":   int(p["min_dte"]),
+            "max_dte":   int(p["max_dte"]),
+            "delta_min": float(p["delta_min"]),
+            "delta_max": float(p["delta_max"]),
+            "cadence":   cadence,
+        }
+    return {
+        "min_dte":   int(ProjectSettings.get(project_id, "csp_min_dte")),
+        "max_dte":   int(ProjectSettings.get(project_id, "csp_max_dte")),
+        "delta_min": float(ProjectSettings.get(project_id, "csp_delta_min")),
+        "delta_max": float(ProjectSettings.get(project_id, "csp_delta_max")),
+        "cadence":   "custom",
+    }

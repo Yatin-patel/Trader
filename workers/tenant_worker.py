@@ -4,26 +4,31 @@ Owns an isolated LangGraph compiled instance and an independent loop.
 
 Market-hours enforcement
 ------------------------
-The worker REFUSES to run a cycle outside US equity/options regular trading
-hours. The check happens at two layers:
+The worker REFUSES to run a cycle outside US equity/options trading hours.
+The check happens at two layers:
 
   1. Hard gate at the top of every cycle: query Alpaca's market clock. If
-     `is_open` is false, sleep until `next_open` (capped at 1h for resilience
-     to clock drift / weekend spans) and try again. No scan, no LLM call,
-     no order submission ever occurs while the market is closed.
+     `is_open` is false, the worker normally sleeps until `next_open`.
+     Exception: when the project's `use_extended_hours` setting is True
+     AND the current US/Eastern time is inside the extended-hours window
+     (04:00-20:00 ET) on a trading day, the cycle is allowed to run so
+     the executor can submit `extended_hours=True` orders.
   2. A short process-level cache (~10s) keeps simultaneous tenants from
      hammering the Alpaca clock endpoint.
-
-The `market_hours_only` global setting controls only whether to *report*
-the wait — it is treated as always-on for trade safety.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timezone
 from typing import Any
+
+try:
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+except Exception:
+    _ET = None
 
 from db.repositories import EventsRepo, ProjectsRepo
 from db.settings_store import AppSettings, ProjectSettings
@@ -37,9 +42,9 @@ logger = logging.getLogger(__name__)
 _CLOCK_CACHE: dict[str, Any] = {"ts": 0.0, "value": None}
 _CLOCK_TTL_SECONDS = 10.0
 
-# Safety cap: never sleep more than this in one wait, so a stale clock or
-# config edit can recover within an hour.
-_MAX_WAIT_SECONDS = 3600
+# Safety cap on a single wait. Kept short so a settings change (e.g. enabling
+# use_extended_hours during pre-market) propagates within a few minutes.
+_MAX_WAIT_SECONDS = 300
 
 
 def _get_cached_clock(client: AlpacaClient) -> dict[str, Any]:
@@ -50,6 +55,43 @@ def _get_cached_clock(client: AlpacaClient) -> dict[str, Any]:
     _CLOCK_CACHE["value"] = clock
     _CLOCK_CACHE["ts"] = now
     return clock
+
+
+# Process-wide trading-calendar cache (per AlpacaClient instance, keyed by
+# base URL) — refreshed daily.
+_CAL_CACHE: dict[str, tuple[float, set[str]]] = {}
+_CAL_TTL_SECONDS = 6 * 3600
+
+
+def _trading_days(client: AlpacaClient) -> set[str]:
+    """ISO-date strings (YYYY-MM-DD) for the next few trading sessions."""
+    key = getattr(client.project, "alpaca_base_url", "") or "default"
+    now = time.monotonic()
+    hit = _CAL_CACHE.get(key)
+    if hit is not None and (now - hit[0]) < _CAL_TTL_SECONDS:
+        return hit[1]
+    try:
+        cal = client.get_calendar(days=7)
+        days = {str(c.get("date")) for c in cal if c.get("date")}
+    except Exception:
+        days = set()
+    _CAL_CACHE[key] = (now, days)
+    return days
+
+
+def _in_extended_hours_window(client: AlpacaClient) -> bool:
+    """True if current US/Eastern time is in [04:00, 20:00) on a trading day.
+
+    Returns False if zoneinfo is unavailable or the calendar lookup fails —
+    we'd rather skip a cycle than submit during a holiday.
+    """
+    if _ET is None:
+        return False
+    et = datetime.now(_ET)
+    if not (dtime(4, 0) <= et.time() < dtime(20, 0)):
+        return False
+    today_iso = et.date().isoformat()
+    return today_iso in _trading_days(client)
 
 
 def _seconds_until(next_open: Any) -> int:
@@ -113,13 +155,24 @@ class TenantWorker:
         client = AlpacaClient(project)
 
         # --- HARD GATE: market hours -----------------------------------------
+        # Allow the cycle if either:
+        #   (a) Alpaca's clock says RTH is open, OR
+        #   (b) The project opted into extended-hours trading AND we are
+        #       inside the 04:00-20:00 ET extended-hours window on a
+        #       trading day.
         clock = _get_cached_clock(client)
-        if not clock.get("is_open"):
+        rth_open = bool(clock.get("is_open"))
+        allow_ext = bool(ProjectSettings.get(self.project_id,
+                                             "use_extended_hours",
+                                             default=False))
+        ext_open = allow_ext and _in_extended_hours_window(client)
+        if not (rth_open or ext_open):
             wait = _seconds_until(clock.get("next_open"))
             EventsRepo.log(self.project_id, "Worker", "LOOP", {
                 "skipped": "market_closed",
                 "next_open": str(clock.get("next_open")),
                 "sleeping_seconds": wait,
+                "use_extended_hours": allow_ext,
             })
             return max(wait, 30)  # never check more often than every 30s when closed
 
@@ -159,10 +212,12 @@ class TenantWorker:
             logger.exception("position-mgmt step failed: %s", e)
 
         # If market closes mid-cycle, sleep until next open instead of looping fast.
-        # But only if we actually have a future `next_open` — a transient clock
-        # hiccup with next_open=None should not silence the worker for an hour.
+        # When extended-hours is enabled and we're still inside the ET 04-20
+        # window, keep cycling at the normal cadence.
         clock_after = _get_cached_clock(client)
         if not clock_after.get("is_open"):
+            if allow_ext and _in_extended_hours_window(client):
+                return self._cycle_interval()
             next_open = clock_after.get("next_open")
             if next_open:
                 return max(_seconds_until(next_open), 30)
