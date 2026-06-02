@@ -1,0 +1,79 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }} · Notifications{% endblock %}
+{% block content %}
+<section class="panel" data-project-id="{{ project.project_id }}" id="notif-root">
+  <header class="panel-head">
+    <div>
+      <h1>Notifications</h1>
+      <span class="muted">
+        <a href="/projects/{{ project.project_id }}">← back to dashboard</a>
+        &nbsp;·&nbsp; {{ project.project_name }}
+      </span>
+    </div>
+    <div class="status-bar">
+      <button class="btn small primary" id="add-channel">+ Add channel</button>
+      <button class="btn small ghost" id="digest-now">Send digest now</button>
+    </div>
+  </header>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>Channels</h2></header>
+  <table class="data" id="channels-table">
+    <thead>
+      <tr><th>Type</th><th>Name</th><th>Target</th><th>Events</th>
+          <th>Enabled</th><th>Sent</th><th>Last error</th><th></th></tr>
+    </thead>
+    <tbody><tr><td colspan="8" class="empty">No channels yet.</td></tr></tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>History</h2>
+    <button class="btn small ghost" id="mark-all-read">Mark all read</button>
+  </header>
+  <table class="data" id="notif-history">
+    <thead><tr><th>When</th><th>Severity</th><th>Event</th><th>Title</th>
+               <th>Status</th><th>Read</th></tr></thead>
+    <tbody><tr><td colspan="6" class="empty">No notifications.</td></tr></tbody>
+  </table>
+</section>
+
+<dialog id="channel-dialog">
+  <form id="channel-form" method="dialog">
+    <h2 id="channel-form-title">New Channel</h2>
+    <input type="hidden" name="channel_id" value="">
+    <label>Type
+      <select name="channel_type">
+        <option value="discord">Discord webhook</option>
+        <option value="slack">Slack webhook</option>
+        <option value="email">Email (SMTP)</option>
+        <option value="in_app">In-app only</option>
+      </select>
+    </label>
+    <label>Name <input type="text" name="name" required></label>
+    <label>Target
+      <input type="text" name="target" placeholder="https://discord.com/api/webhooks/… or you@example.com" required>
+    </label>
+    <label>Events filter (comma-separated, blank = defaults)
+      <input type="text" name="events_filter" placeholder="KILL_SWITCH,EXECUTE,ERROR,*">
+    </label>
+    <fieldset id="email-fields" hidden style="border: 1px solid var(--border); padding: 10px; border-radius: 4px;">
+      <legend class="muted">Email SMTP config</legend>
+      <label>SMTP host <input type="text" name="smtp_host" placeholder="smtp.gmail.com"></label>
+      <label>SMTP port <input type="number" name="smtp_port" value="587"></label>
+      <label>SMTP user <input type="text" name="smtp_user"></label>
+      <label>SMTP password <input type="password" name="smtp_password"></label>
+      <label>From address <input type="text" name="from"></label>
+      <label class="checkbox"><input type="checkbox" name="use_tls" checked> Use TLS</label>
+    </fieldset>
+    <label class="checkbox"><input type="checkbox" name="enabled" checked> Enabled</label>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/notifications.js?v=3"></script>
+{% endblock %}

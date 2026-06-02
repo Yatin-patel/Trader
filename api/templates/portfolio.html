@@ -1,0 +1,29 @@
+{% extends "_layout.html" %}
+{% block title %}Portfolio · All Tenants{% endblock %}
+{% block content %}
+<section class="panel" id="port-root">
+  <header class="panel-head">
+    <h1>Cross-Tenant Portfolio</h1>
+    <button class="btn small ghost" id="port-refresh">Refresh</button>
+  </header>
+</section>
+
+<section class="cards">
+  <div class="card"><div class="card-label">Total Equity</div><div class="card-value" id="tot-equity">—</div></div>
+  <div class="card"><div class="card-label">Unrealized P/L</div><div class="card-value" id="tot-unrealized">—</div></div>
+  <div class="card"><div class="card-label">Realized (Month)</div><div class="card-value" id="tot-realized">—</div></div>
+  <div class="card"><div class="card-label">Active Tenants</div><div class="card-value" id="tot-active">—</div></div>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>Per Tenant</h2></header>
+  <table class="data" id="port-table">
+    <thead><tr><th>Project</th><th>Active</th><th>Equity</th>
+      <th>Unrealized</th><th>Realized (30d)</th><th>Trades (30d)</th>
+      <th>Win Rate</th></tr></thead>
+    <tbody><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+  </table>
+</section>
+
+<script src="/static/portfolio.js"></script>
+{% endblock %}

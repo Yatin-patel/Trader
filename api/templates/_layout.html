@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}Autonomous Trader{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css?v=11">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M13 2L4.5 13.5h6L11 22l8.5-11.5h-6L13 2z"
+              fill="currentColor" />
+      </svg>
+      <span>Autonomous Trader</span>
+    </div>
+    <nav>
+      <a href="/dashboard">Dashboard</a>
+      <a href="/settings">Global Settings</a>
+      <a href="/logs">Logs</a>
+      <a href="/help">Help</a>
+      {% if current_user %}
+        <a href="/account" class="topnav-user" title="{{ current_user.email }} — account settings">
+          {{ current_user.email }}
+        </a>
+        <a href="/logout" class="topnav-logout">Sign out</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  {% if project %}
+  <nav class="project-subnav" data-project-id="{{ project.project_id }}"
+       data-broker-type="{{ project.broker_type or 'alpaca' }}">
+    <div class="subnav-title">
+      <a href="/projects/{{ project.project_id }}" class="subnav-brand">{{ project.project_name }}</a>
+      <span class="muted subnav-env">
+        {% if (project.broker_type or 'alpaca') == 'etrade' %}
+          <code>ETrade · {{ project.etrade_environment or 'sandbox' }}</code>
+        {% else %}
+          <code>{{ project.alpaca_base_url }}</code>
+        {% endif %}
+      </span>
+    </div>
+    <div class="subnav-actions">
+      <span class="badge" id="market-badge">…</span>
+      <span class="badge" id="runner-badge">runner: …</span>
+      <a class="btn small ghost" href="/projects/{{ project.project_id }}/performance">Performance</a>
+      <a class="btn small ghost" href="/projects/{{ project.project_id }}/analysis">Analysis</a>
+      <a class="btn small ghost" href="/projects/{{ project.project_id }}/risk">Risk</a>
+      <a class="btn small ghost" href="/projects/{{ project.project_id }}/cycles">Wheel History</a>
+      <a class="btn small ghost" href="/projects/{{ project.project_id }}/reliability">Reliability</a>
+      <a class="btn small ghost" href="/projects/{{ project.project_id }}/intelligence">Intelligence</a>
+      <a class="btn small ghost" href="/projects/{{ project.project_id }}/outlook">Outlook</a>
+      <a class="btn small ghost" href="/projects/{{ project.project_id }}/backtest">Backtest</a>
+      <a class="btn small ghost" href="/api/projects/{{ project.project_id }}/journal/export.csv">Export CSV</a>
+      <a class="btn small ghost" href="/projects/{{ project.project_id }}/notifications">Notifications</a>
+      <a class="btn small ghost" href="/projects/{{ project.project_id }}/logs">Logs</a>
+      {% if (project.broker_type or 'alpaca') == 'etrade' and not project.etrade_access_token %}
+        <a class="btn small primary" href="/etrade/connect?project_id={{ project.project_id }}">⚡ Connect ETrade</a>
+      {% endif %}
+      <button class="btn small primary" id="open-optimize" type="button">Optimize</button>
+      <span class="badge ghost" id="last-update">updating…</span>
+    </div>
+  </nav>
+
+  <dialog id="optimize-dialog">
+    <form method="dialog">
+      <h2 style="margin: 0 0 12px;">Optimize Settings</h2>
+      <p class="muted" style="margin: 0 0 14px; font-size: 13px;">
+        Tunes the project for your current cash balance + chosen strategy.
+        Adjusts concentration, collateral cap, and watchlist so trades
+        actually fit in your account.
+      </p>
+      <label>
+        Strategy
+        <select id="optimize-strategy" required>
+          <option value="conservative_wheel">Conservative Wheel</option>
+          <option value="aggressive_income" selected>Aggressive Income</option>
+          <option value="iv_disciplined">IV-Disciplined</option>
+        </select>
+      </label>
+      <div id="optimize-preview" style="margin: 14px 0; padding: 12px;
+           background: var(--panel-soft); border-radius: var(--radius-sm);
+           font-size: 13px; min-height: 60px;">
+        <span class="muted">Click Preview to see what will change.</span>
+      </div>
+      <label style="display: flex; align-items: center; gap: 8px;
+             margin: 8px 0 4px; font-size: 13px; color: var(--text-soft);">
+        <input type="checkbox" id="optimize-iterate" style="width:16px;height:16px;">
+        <span>After applying, iterate with AI suggestions (up to 5 rounds)</span>
+      </label>
+      <div id="optimize-iter-log" hidden style="margin: 10px 0; padding: 10px 12px;
+           background: var(--panel-soft); border-radius: var(--radius-sm);
+           font-size: 12px; max-height: 200px; overflow-y: auto;">
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost small" id="optimize-preview-btn">Preview</button>
+        <button type="button" class="btn ghost small" value="cancel">Cancel</button>
+        <button type="button" class="btn primary small" id="optimize-apply-btn" disabled>Apply</button>
+      </div>
+    </form>
+  </dialog>
+  {% endif %}
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <!-- Floating AI chat widget -->
+  <button id="chat-fab" class="chat-fab" title="Ask the AI" aria-label="Open AI chat">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+    </svg>
+  </button>
+  <section id="chat-panel" class="chat-panel" hidden>
+    <header class="chat-head">
+      <div>
+        <strong>AI Assistant</strong>
+        <span class="muted" id="chat-provider">—</span>
+      </div>
+      <div>
+        <button class="btn ghost small" id="chat-clear">Clear</button>
+        <button class="btn ghost small" id="chat-close">✕</button>
+      </div>
+    </header>
+    <div id="chat-body" class="chat-body">
+      <div class="chat-msg system">Ask anything about your trader, a recent decision, or wheel-strategy concepts.</div>
+    </div>
+    <form id="chat-form" class="chat-form">
+      <textarea id="chat-input" rows="2" placeholder="Type a message… (Shift+Enter for newline)"></textarea>
+      <button type="submit" class="btn primary small">Send</button>
+    </form>
+  </section>
+
+  <script src="/static/toast.js?v=2"></script>
+  <script src="/static/single_window.js?v=1"></script>
+  <script src="/static/app.js?v=2"></script>
+  <script src="/static/chat.js?v=2"></script>
+  <script src="/static/notification_bell.js?v=5"></script>
+  {% if project %}
+  <script src="/static/project_nav.js?v=1"></script>
+  <script src="/static/optimize.js?v=4"></script>
+  {% endif %}
+</body>
+</html>

@@ -1,0 +1,155 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }} · Market Outlook{% endblock %}
+{% block content %}
+<section class="panel" data-project-id="{{ project.project_id }}" id="outlook-root">
+  <header class="panel-head">
+    <div>
+      <h1>Market Outlook</h1>
+      <span class="muted">
+        <a href="/projects/{{ project.project_id }}">← back to dashboard</a>
+        &nbsp;·&nbsp; {{ project.project_name }}
+      </span>
+    </div>
+    <div class="status-bar">
+      <button class="btn small ghost" id="outlook-refresh">Refresh rankings</button>
+    </div>
+  </header>
+</section>
+
+<section class="panel">
+  <header class="panel-head">
+    <h2>Top Performers</h2>
+    <span class="muted" id="ranking-meta">Ranked by realized P&amp;L, win rate, momentum, IV rank</span>
+  </header>
+  <table class="data" id="performers-table">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Ticker</th>
+        <th>Price</th>
+        <th>1M</th>
+        <th>3M</th>
+        <th>6M</th>
+        <th>IV Rank</th>
+        <th>Wheel P&amp;L</th>
+        <th>Win %</th>
+        <th>Cycles</th>
+        <th>Score</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody><tr><td colspan="12" class="empty">Loading rankings… (first load may take 30-60s)</td></tr></tbody>
+  </table>
+</section>
+
+<section class="panel" id="outlook-detail-panel" hidden>
+  <header class="panel-head">
+    <h2 id="outlook-ticker-title">Outlook</h2>
+    <span class="muted" id="outlook-meta"></span>
+  </header>
+  <div id="outlook-detail" style="padding: 18px 24px;">Loading…</div>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>How this page works</h2></header>
+  <div style="padding: 18px 24px; line-height: 1.6;">
+    <p><strong>Universe:</strong> a union of (S&amp;P large-caps, this project's scanner watchlist,
+       tickers you've already traded). Capped at ~60.</p>
+    <p><strong>Composite score</strong> is an equal-weighted blend of normalized
+       realized P&amp;L, win rate, trailing momentum (1M / 3M / 6M), and current IV rank.
+       Higher = better wheel candidate <em>right now</em>.</p>
+    <p><strong>30 / 60 / 90-day outlook</strong> (per ticker) combines two views:</p>
+    <ul>
+      <li><strong>Quant</strong> — projects price bands using a lognormal model fit to
+        ~1 year of daily returns. Shows median, 10th-90th percentile band, and
+        probability of finishing above current price.</li>
+      <li><strong>LLM narrative</strong> — Gemini/Claude writes one paragraph per horizon,
+        grounded in those quant numbers + IV rank + your wheel history + momentum.
+        Cached for 12 hours per ticker.</li>
+    </ul>
+    <p class="muted" style="margin-top: 14px; font-size: 13px;">
+      Outlooks are <em>not investment advice</em>. The quant model assumes returns are
+      lognormal and stationary — it is a useful baseline, not a forecast.
+    </p>
+  </div>
+</section>
+
+<style>
+  /* Outlook-specific tweaks */
+  .perf-row { cursor: pointer; }
+  .perf-row.selected td { background: var(--accent-soft) !important; }
+  .horizon-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .horizon-card {
+    background: var(--panel-soft);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    padding: 16px;
+  }
+  .horizon-card h3 {
+    font-family: var(--font-display);
+    margin: 0 0 10px;
+    font-size: 17px;
+    font-weight: 500;
+  }
+  .horizon-band {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+    margin: 10px 0;
+  }
+  .band-cell {
+    background: white;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    text-align: center;
+  }
+  .band-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .band-value {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text);
+    margin-top: 4px;
+  }
+  .horizon-narrative {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-soft);
+    margin-top: 10px;
+  }
+  .dir-bullish { color: var(--ok-strong); font-weight: 600; }
+  .dir-bearish { color: var(--danger-strong); font-weight: 600; }
+  .dir-neutral { color: var(--muted); font-weight: 600; }
+  .conf-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .conf-low    { background: var(--warn-soft); color: var(--warn-strong); }
+  .conf-medium { background: var(--accent-soft); color: var(--accent-strong); }
+  .conf-high   { background: var(--ok-soft); color: var(--ok-strong); }
+  .quant-foot {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+</style>
+
+<script src="/static/outlook.js?v=2"></script>
+{% endblock %}

@@ -1,0 +1,1962 @@
+"""FastAPI app — settings UI + REST endpoints.
+
+The same process can host the API only, or also spin up the multi-tenant
+runner via lifespan when started with `python main.py`.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+
+from auth import (
+    SESSION_COOKIE, SESSION_TTL_HOURS,
+    UsersRepo, create_session, get_session, list_for_user,
+    hash_password, revoke_session, revoke_others_for_user,
+    verify_password, totp,
+)
+from db import init_database
+from db.repositories import EventsRepo, PositionsRepo, ProjectsRepo, TradingProject, WheelRepo
+from db.settings_store import AppSettings, ProjectSettings
+from execution import AlpacaClient
+from workers import MultiTenantRunner
+
+from .chat import router as chat_router
+from .humanize import humanize_event, summarize_pipeline
+
+logger = logging.getLogger(__name__)
+
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+STATIC_DIR = BASE_DIR / "static"
+TEMPLATES_DIR.mkdir(exist_ok=True)
+STATIC_DIR.mkdir(exist_ok=True)
+
+
+_runner: MultiTenantRunner | None = None
+_runner_task: asyncio.Task | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_database()
+    if getattr(app.state, "autorun", False):
+        global _runner, _runner_task
+        _runner = MultiTenantRunner()
+        _runner_task = asyncio.create_task(_runner.run_forever())
+    yield
+    if _runner is not None:
+        _runner.stop()
+    if _runner_task is not None:
+        try:
+            await asyncio.wait_for(_runner_task, timeout=5)
+        except Exception:
+            _runner_task.cancel()
+
+
+app = FastAPI(title="Autonomous Trader", lifespan=lifespan)
+app.include_router(chat_router)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+# ---------- Auth middleware --------------------------------------------------
+# Paths that are accessible without login. Everything else gets a redirect to
+# /login (for HTML requests) or a 401 JSON response (for /api/ requests).
+_PUBLIC_PREFIXES = (
+    "/login", "/signup", "/logout",
+    "/static/", "/favicon.ico", "/metrics", "/openapi.json", "/docs", "/redoc",
+)
+
+
+def _is_public_path(path: str) -> bool:
+    if path in ("/", "/login", "/signup", "/logout", "/login/2fa",
+                "/favicon.ico"):
+        return True
+    return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+    # NOTE: /etrade/* stays AUTHENTICATED — only logged-in owners can
+    # initiate or complete the OAuth dance for their own projects.
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+
+    # Resolve current user from session cookie (if any). Always set
+    # request.state.user so templates can show login state even on public pages.
+    user = None
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        sess = get_session(token)
+        if sess:
+            u = UsersRepo.get_by_id(sess["user_id"])
+            if u and u.is_active:
+                user = u
+    request.state.user = user
+    request.state.user_id = user.user_id if user else None
+    request.state.is_admin = bool(user.is_admin) if user else False
+
+    if _is_public_path(path):
+        return await call_next(request)
+
+    if user is None:
+        # Unauthenticated. /api/* gets JSON 401; everything else redirects.
+        if path.startswith("/api/"):
+            return JSONResponse(
+                {"detail": "login required"}, status_code=401,
+            )
+        return RedirectResponse(url=f"/login?next={path}", status_code=303)
+
+    return await call_next(request)
+
+
+# Inject current_user into every Jinja template (sub-nav uses it).
+_orig_template_response = templates.TemplateResponse
+
+
+def _template_response_with_user(*args, **kwargs):
+    # FastAPI calls TemplateResponse(name, context) or
+    # TemplateResponse(request, name, context). Handle both.
+    if args and hasattr(args[0], "scope"):  # called with request first
+        request = args[0]
+        ctx = args[2] if len(args) > 2 else kwargs.get("context", {})
+    else:
+        ctx = args[1] if len(args) > 1 else kwargs.get("context", {})
+        request = ctx.get("request") if isinstance(ctx, dict) else None
+    if request is not None and isinstance(ctx, dict):
+        ctx.setdefault("current_user", getattr(request.state, "user", None))
+    return _orig_template_response(*args, **kwargs)
+
+
+templates.TemplateResponse = _template_response_with_user   # type: ignore
+
+
+# ---------- Schemas -----------------------------------------------------------
+
+class ProjectIn(BaseModel):
+    project_id: str
+    project_name: str
+    broker_type: str = "alpaca"
+    # Alpaca (optional for ETrade projects)
+    alpaca_api_key: str = ""
+    alpaca_secret_key: str = ""
+    alpaca_base_url: str = "https://paper-api.alpaca.markets"
+    alpaca_data_feed: str = "iex"
+    # ETrade (optional for Alpaca projects)
+    etrade_consumer_key: str = ""
+    etrade_consumer_secret: str = ""
+    etrade_environment: str = "sandbox"
+    max_equity_allocation: float
+    is_active: bool = True
+
+
+class SettingIn(BaseModel):
+    key: str
+    value: Any
+    value_type: str = "string"
+    category: str = "general"
+    description: str | None = None
+    is_secret: bool = False
+
+
+class ProjectSettingIn(BaseModel):
+    key: str
+    value: Any
+    value_type: str | None = None
+
+
+# ---------- Auth pages + endpoints -------------------------------------------
+
+def _current_user_id(request: Request) -> str | None:
+    """Returns current user's id (or None)."""
+    return getattr(request.state, "user_id", None)
+
+
+def _scoped_project(project_id: str, request: Request) -> TradingProject:
+    """Fetch a project, enforcing ownership. Admins see all projects."""
+    uid = _current_user_id(request)
+    is_admin = bool(getattr(request.state, "is_admin", False))
+    project = ProjectsRepo.get(project_id, user_id=None if is_admin else uid)
+    if project is None:
+        raise HTTPException(404, "Project not found")
+    return project
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, error: str | None = None,
+                     email: str | None = None):
+    # Already logged in? Skip to dashboard.
+    if getattr(request.state, "user", None) is not None:
+        return RedirectResponse("/dashboard", status_code=303)
+    return templates.TemplateResponse("login.html", {
+        "request": request, "error": error, "email": email,
+    })
+
+
+@app.post("/login")
+async def login_submit(request: Request,
+                       email: str = Form(...),
+                       password: str = Form(...)):
+    email = email.strip().lower()
+    user = UsersRepo.get_by_email(email)
+    pw_hash = UsersRepo.get_password_hash(user.user_id) if user else None
+
+    # Always run verify even when user is None to avoid timing-based user
+    # enumeration. argon2.verify on a fake hash takes about the same time as
+    # the real check, then the comparison fails uniformly.
+    if user is None or pw_hash is None or not verify_password(password, pw_hash):
+        return templates.TemplateResponse("login.html", {
+            "request": request,
+            "error": "Invalid email or password.",
+            "email": email,
+        }, status_code=401)
+
+    if not user.is_active:
+        return templates.TemplateResponse("login.html", {
+            "request": request,
+            "error": "This account has been disabled.",
+            "email": email,
+        }, status_code=401)
+
+    next_url = request.query_params.get("next") or "/dashboard"
+    if not next_url.startswith("/") or next_url.startswith("//"):
+        next_url = "/dashboard"
+
+    # 2FA gate: if enabled, stash a short-lived pending-login token signed
+    # with itsdangerous and prompt for the TOTP code on /login/2fa.
+    if user.totp_enabled:
+        from itsdangerous import URLSafeTimedSerializer
+        signer = URLSafeTimedSerializer(_pending_2fa_secret(), salt="2fa-login")
+        pending = signer.dumps({"uid": user.user_id, "next": next_url})
+        return templates.TemplateResponse("login_2fa.html", {
+            "request": request, "pending": pending, "error": None,
+        })
+
+    # No 2FA — issue session immediately.
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    token, _expires = create_session(user.user_id, ip=ip, user_agent=ua)
+    UsersRepo.touch_last_login(user.user_id)
+
+    resp = RedirectResponse(next_url, status_code=303)
+    resp.set_cookie(
+        key=SESSION_COOKIE, value=token,
+        httponly=True, samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    return resp
+
+
+def _pending_2fa_secret() -> str:
+    """Signing key for the short-lived pending-2FA token. Pulled from
+    app_settings so it survives restarts; auto-created on first use."""
+    key = AppSettings.get("pending_2fa_secret")
+    if not key:
+        import secrets as _secrets
+        key = _secrets.token_urlsafe(32)
+        AppSettings.set("pending_2fa_secret", key,
+                        value_type="secret", category="auth",
+                        description="Internal signing key for 2FA gate",
+                        is_secret=True)
+    return key
+
+
+@app.post("/login/2fa")
+async def login_2fa_submit(request: Request,
+                           pending: str = Form(...),
+                           code: str = Form(...)):
+    from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+    signer = URLSafeTimedSerializer(_pending_2fa_secret(), salt="2fa-login")
+    try:
+        payload = signer.loads(pending, max_age=300)  # 5-min window
+    except (BadSignature, SignatureExpired):
+        return RedirectResponse("/login?error=2fa+session+expired", status_code=303)
+
+    user = UsersRepo.get_by_id(payload["uid"])
+    if user is None or not user.is_active or not user.totp_enabled:
+        return RedirectResponse("/login", status_code=303)
+
+    secret = UsersRepo.get_totp_secret(user.user_id)
+    if not secret or not totp.verify(secret, code):
+        return templates.TemplateResponse("login_2fa.html", {
+            "request": request, "pending": pending,
+            "error": "Code didn't match. Try the latest 6-digit code.",
+        }, status_code=401)
+
+    # Code verified — create session.
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    token, _expires = create_session(user.user_id, ip=ip, user_agent=ua)
+    UsersRepo.touch_last_login(user.user_id)
+
+    resp = RedirectResponse(payload.get("next") or "/dashboard", status_code=303)
+    resp.set_cookie(
+        key=SESSION_COOKIE, value=token,
+        httponly=True, samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    return resp
+
+
+@app.get("/signup", response_class=HTMLResponse)
+async def signup_page(request: Request, error: str | None = None,
+                      email: str | None = None):
+    if getattr(request.state, "user", None) is not None:
+        return RedirectResponse("/dashboard", status_code=303)
+    return templates.TemplateResponse("signup.html", {
+        "request": request, "error": error, "email": email,
+    })
+
+
+@app.post("/signup")
+async def signup_submit(request: Request,
+                        email: str = Form(...),
+                        password: str = Form(...),
+                        password_confirm: str = Form(...)):
+    email = email.strip().lower()
+    err = None
+    if len(password) < 10:
+        err = "Password must be at least 10 characters."
+    elif password != password_confirm:
+        err = "Passwords do not match."
+    elif "@" not in email or "." not in email:
+        err = "Please enter a valid email."
+    elif UsersRepo.get_by_email(email) is not None:
+        err = "An account with this email already exists."
+
+    if err:
+        return templates.TemplateResponse("signup.html", {
+            "request": request, "error": err, "email": email,
+        }, status_code=400)
+
+    # First user becomes admin automatically AND inherits any pre-existing
+    # projects that have no owner yet (the bootstrap migration path).
+    is_admin = UsersRepo.count() == 0
+    user = UsersRepo.create(
+        email=email, password_hash=hash_password(password), is_admin=is_admin,
+    )
+    if is_admin:
+        from sqlalchemy import text as _sql_text
+        from db.connection import session_scope as _scope
+        with _scope() as s:
+            s.execute(_sql_text(
+                "UPDATE dbo.trading_projects SET user_id = :u "
+                "WHERE user_id IS NULL"
+            ), {"u": user.user_id})
+            s.commit()
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    token, _ = create_session(user.user_id, ip=ip, user_agent=ua)
+
+    resp = RedirectResponse("/dashboard", status_code=303)
+    # No max_age — browser drops the cookie when the window closes.
+    # Server-side session still lasts SESSION_TTL_HOURS as a safety upper
+    # bound, but in practice the cookie is gone the moment the user quits.
+    resp.set_cookie(
+        key=SESSION_COOKIE, value=token,
+        httponly=True, samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    return resp
+
+
+@app.post("/logout")
+async def logout(request: Request):
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        revoke_session(token)
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie(SESSION_COOKIE)
+    return resp
+
+
+@app.get("/logout")
+async def logout_get(request: Request):
+    # Convenience GET so the top-nav link works without a form.
+    return await logout(request)
+
+
+# ---------- Account self-service ---------------------------------------------
+
+@app.get("/account", response_class=HTMLResponse)
+async def account_page(request: Request,
+                       pw_error: str | None = None,
+                       pw_success: bool = False,
+                       totp_error: str | None = None):
+    user = getattr(request.state, "user", None)
+    if user is None:
+        return RedirectResponse("/login?next=/account", status_code=303)
+
+    # Active sessions for this user
+    sessions = list_for_user(user.user_id)
+    current_token = request.cookies.get(SESSION_COOKIE)
+    active = []
+    for s in sessions:
+        active.append({
+            "token": s["token"],
+            "created_at_str": s["created_at"].strftime("%Y-%m-%d %H:%M UTC")
+                if s["created_at"] else "—",
+            "expires_at_str": s["expires_at"].strftime("%Y-%m-%d %H:%M UTC")
+                if s["expires_at"] else "—",
+            "ip_address": s["ip_address"],
+            "user_agent": s["user_agent"],
+            "is_current": s["token"] == current_token,
+        })
+
+    return templates.TemplateResponse("account.html", {
+        "request": request,
+        "active_sessions": active,
+        "pw_error": pw_error,
+        "pw_success": pw_success,
+        "totp_error": totp_error,
+        "provisioning_uri": None,
+        "qr_data_uri": None,
+        "totp_secret": None,
+        "default_broker": _get_default_broker(user.user_id),
+    })
+
+
+@app.post("/account/change_password")
+async def account_change_password(request: Request,
+                                  current_password: str = Form(...),
+                                  new_password: str = Form(...),
+                                  new_password_confirm: str = Form(...)):
+    user = getattr(request.state, "user", None)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+
+    if new_password != new_password_confirm:
+        return RedirectResponse(
+            "/account?pw_error=New+passwords+do+not+match.",
+            status_code=303)
+    if len(new_password) < 10:
+        return RedirectResponse(
+            "/account?pw_error=Password+must+be+at+least+10+characters.",
+            status_code=303)
+
+    current_hash = UsersRepo.get_password_hash(user.user_id)
+    if not current_hash or not verify_password(current_password, current_hash):
+        return RedirectResponse(
+            "/account?pw_error=Current+password+is+incorrect.",
+            status_code=303)
+
+    UsersRepo.update_password(user.user_id, hash_password(new_password))
+    # For safety, kill every OTHER session (forces re-login on other devices).
+    revoke_others_for_user(user.user_id,
+                           keep_token=request.cookies.get(SESSION_COOKIE) or "")
+    return RedirectResponse("/account?pw_success=1", status_code=303)
+
+
+@app.post("/account/2fa/setup")
+async def account_2fa_setup(request: Request):
+    """Generate a fresh TOTP secret and show the QR + manual key.
+    Secret is held in the URL so we don't store it before verification."""
+    user = getattr(request.state, "user", None)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if user.totp_enabled:
+        return RedirectResponse("/account", status_code=303)
+
+    secret = totp.generate_secret()
+    uri = totp.provisioning_uri(user.email, secret)
+    qr = totp.qr_png_data_uri(uri)
+
+    sessions = list_for_user(user.user_id)
+    current_token = request.cookies.get(SESSION_COOKIE)
+    active = []
+    for s in sessions:
+        active.append({
+            "token": s["token"],
+            "created_at_str": s["created_at"].strftime("%Y-%m-%d %H:%M UTC")
+                if s["created_at"] else "—",
+            "expires_at_str": s["expires_at"].strftime("%Y-%m-%d %H:%M UTC")
+                if s["expires_at"] else "—",
+            "ip_address": s["ip_address"],
+            "user_agent": s["user_agent"],
+            "is_current": s["token"] == current_token,
+        })
+    return templates.TemplateResponse("account.html", {
+        "request": request,
+        "active_sessions": active,
+        "pw_error": None, "pw_success": False, "totp_error": None,
+        "provisioning_uri": uri,
+        "qr_data_uri": qr,
+        "totp_secret": secret,
+        "default_broker": _get_default_broker(user.user_id),
+    })
+
+
+@app.post("/account/2fa/verify")
+async def account_2fa_verify(request: Request,
+                             secret: str = Form(...),
+                             code: str = Form(...)):
+    user = getattr(request.state, "user", None)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+
+    if not totp.verify(secret, code):
+        # Re-render setup view with error
+        uri = totp.provisioning_uri(user.email, secret)
+        qr = totp.qr_png_data_uri(uri)
+        sessions = list_for_user(user.user_id)
+        current_token = request.cookies.get(SESSION_COOKIE)
+        active = []
+        for s in sessions:
+            active.append({
+                "token": s["token"],
+                "created_at_str": s["created_at"].strftime("%Y-%m-%d %H:%M UTC")
+                    if s["created_at"] else "—",
+                "expires_at_str": s["expires_at"].strftime("%Y-%m-%d %H:%M UTC")
+                    if s["expires_at"] else "—",
+                "ip_address": s["ip_address"],
+                "user_agent": s["user_agent"],
+                "is_current": s["token"] == current_token,
+            })
+        return templates.TemplateResponse("account.html", {
+            "request": request,
+            "active_sessions": active,
+            "pw_error": None, "pw_success": False,
+            "totp_error": "Code didn't match. Try again with the latest code from your app.",
+            "provisioning_uri": uri, "qr_data_uri": qr, "totp_secret": secret,
+            "default_broker": _get_default_broker(user.user_id),
+        }, status_code=400)
+
+    UsersRepo.set_totp(user.user_id, secret=secret, enabled=True)
+    return RedirectResponse("/account", status_code=303)
+
+
+@app.post("/account/2fa/disable")
+async def account_2fa_disable(request: Request):
+    user = getattr(request.state, "user", None)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    UsersRepo.disable_totp(user.user_id)
+    return RedirectResponse("/account", status_code=303)
+
+
+@app.post("/account/sessions/revoke_others")
+async def account_revoke_others(request: Request):
+    user = getattr(request.state, "user", None)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    keep = request.cookies.get(SESSION_COOKIE) or ""
+    revoke_others_for_user(user.user_id, keep_token=keep)
+    return RedirectResponse("/account", status_code=303)
+
+
+# ---------- ETrade OAuth 1.0a flow -------------------------------------------
+# ETrade uses out-of-band (OOB) authorization: the user visits ETrade's
+# authorize URL, ETrade shows a 5-digit verifier code on screen, the user
+# pastes it back here. There is no automatic redirect callback like OAuth 2.
+
+# In-memory store of pending request tokens keyed by (project_id, user_id).
+# Tiny TTL — only used for the few minutes between /connect and /callback.
+_ETRADE_PENDING: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+@app.get("/etrade/connect", response_class=HTMLResponse)
+async def etrade_connect(request: Request, project_id: str):
+    """Step 1: mint a request token, show the authorize link + verifier form."""
+    project = _scoped_project(project_id, request)
+    if project.broker_type != "etrade":
+        raise HTTPException(400, "This project is not configured for ETrade.")
+    if not project.etrade_consumer_key or not project.etrade_consumer_secret:
+        raise HTTPException(400,
+            "Add ETrade Consumer Key + Secret to the project before connecting.")
+
+    from execution.etrade_client import begin_oauth
+    try:
+        req_token, req_secret, authorize_url = await asyncio.to_thread(
+            begin_oauth,
+            project.etrade_consumer_key,
+            project.etrade_consumer_secret,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"ETrade rejected the request: {e}")
+
+    uid = request.state.user_id or ""
+    _ETRADE_PENDING[(project_id, uid)] = {
+        "request_token": req_token,
+        "request_token_secret": req_secret,
+    }
+
+    return templates.TemplateResponse("etrade_connect.html", {
+        "request": request,
+        "project": project,
+        "authorize_url": authorize_url,
+    })
+
+
+@app.post("/etrade/callback")
+async def etrade_callback(request: Request,
+                          project_id: str = Form(...),
+                          verifier: str = Form(...)):
+    """Step 3: exchange the verifier for an access token, persist it."""
+    project = _scoped_project(project_id, request)
+    if project.broker_type != "etrade":
+        raise HTTPException(400, "This project is not configured for ETrade.")
+
+    uid = request.state.user_id or ""
+    pending = _ETRADE_PENDING.pop((project_id, uid), None)
+    if not pending:
+        raise HTTPException(400,
+            "OAuth session expired. Restart the connect flow.")
+
+    from execution.etrade_client import complete_oauth
+    try:
+        access_token, access_secret = await asyncio.to_thread(
+            complete_oauth,
+            project.etrade_consumer_key,
+            project.etrade_consumer_secret,
+            pending["request_token"],
+            pending["request_token_secret"],
+            verifier.strip(),
+        )
+    except Exception as e:
+        raise HTTPException(400, f"ETrade rejected the verifier code: {e}")
+
+    ProjectsRepo.update_etrade_tokens(
+        project_id,
+        access_token=access_token,
+        access_token_secret=access_secret,
+    )
+    return RedirectResponse(f"/projects/{project_id}", status_code=303)
+
+
+@app.post("/api/projects/{project_id}/etrade/disconnect")
+async def api_etrade_disconnect(request: Request, project_id: str):
+    """Drop the saved access tokens. User must re-OAuth to use ETrade again."""
+    _scoped_project(project_id, request)
+    ProjectsRepo.update_etrade_tokens(
+        project_id, access_token="", access_token_secret="",
+    )
+    return {"ok": True}
+
+
+# ---------- Default broker preference (account page) -------------------------
+
+@app.post("/account/default_broker")
+async def account_set_default_broker(request: Request,
+                                     default_broker: str = Form(...)):
+    user = getattr(request.state, "user", None)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if default_broker not in ("alpaca", "etrade"):
+        raise HTTPException(400, "Invalid broker selection.")
+    from sqlalchemy import text as _sql
+    from db.connection import session_scope as _scope
+    with _scope() as s:
+        exists = s.execute(_sql(
+            "SELECT 1 FROM dbo.user_preferences WHERE user_id = :u"
+        ), {"u": user.user_id}).fetchone()
+        if exists:
+            s.execute(_sql(
+                "UPDATE dbo.user_preferences SET default_broker = :b, "
+                "updated_at = SYSUTCDATETIME() WHERE user_id = :u"
+            ), {"u": user.user_id, "b": default_broker})
+        else:
+            s.execute(_sql(
+                "INSERT INTO dbo.user_preferences (user_id, default_broker) "
+                "VALUES (:u, :b)"
+            ), {"u": user.user_id, "b": default_broker})
+        s.commit()
+    return RedirectResponse("/account", status_code=303)
+
+
+def _get_default_broker(user_id: str) -> str:
+    from sqlalchemy import text as _sql
+    from db.connection import session_scope as _scope
+    with _scope() as s:
+        row = s.execute(_sql(
+            "SELECT default_broker FROM dbo.user_preferences WHERE user_id = :u"
+        ), {"u": user_id}).fetchone()
+    return (row[0] if row else "alpaca")
+
+
+# ---------- Pages -------------------------------------------------------------
+
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    if getattr(request.state, "user", None) is None:
+        return RedirectResponse("/login")
+    return RedirectResponse("/dashboard")
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    uid = getattr(request.state, "user_id", None)
+    is_admin = bool(getattr(request.state, "is_admin", False))
+    projects = ProjectsRepo.list_all(user_id=None if is_admin else uid)
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request,
+        "projects": projects,
+        "runner_active": _runner is not None,
+    })
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    rows = AppSettings.list_all()
+    return templates.TemplateResponse("settings.html", {
+        "request": request,
+        "settings": rows,
+    })
+
+
+@app.get("/projects/{project_id}", response_class=HTMLResponse)
+async def project_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    proj_settings = ProjectSettings.list_for_project(project_id)
+    return templates.TemplateResponse("project.html", {
+        "request": request,
+        "project": project,
+        "project_settings": proj_settings,
+    })
+
+
+class RiskLimitIn(BaseModel):
+    limit_id: int | None = None
+    limit_type: str
+    threshold: float
+    action: str = "HALT"
+    window_minutes: int | None = None
+    enabled: bool = True
+
+
+@app.get("/api/projects/{project_id}/risk/limits")
+async def api_risk_list(project_id: str):
+    from db.risk_repos import RiskLimitsRepo
+    return RiskLimitsRepo.list(project_id)
+
+
+@app.post("/api/projects/{project_id}/risk/limits")
+async def api_risk_upsert(project_id: str, payload: RiskLimitIn):
+    from db.risk_repos import RiskLimitsRepo
+    try:
+        lid = RiskLimitsRepo.upsert(
+            project_id=project_id, limit_type=payload.limit_type,
+            threshold=payload.threshold, action=payload.action,
+            window_minutes=payload.window_minutes, enabled=payload.enabled,
+            limit_id=payload.limit_id,
+        )
+        return {"ok": True, "limit_id": lid}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/projects/{project_id}/risk/limits/{limit_id}")
+async def api_risk_delete(project_id: str, limit_id: int):
+    from db.risk_repos import RiskLimitsRepo
+    RiskLimitsRepo.delete(project_id, limit_id)
+    return {"ok": True}
+
+
+@app.get("/api/projects/{project_id}/risk/greeks")
+async def api_risk_greeks(project_id: str):
+    from risk.greeks_agg import aggregate_greeks
+    return aggregate_greeks(project_id)
+
+
+@app.get("/api/projects/{project_id}/risk/earnings/{ticker}")
+async def api_risk_earnings(project_id: str, ticker: str):
+    from risk.earnings import get_next_earnings
+    nxt = get_next_earnings(ticker)
+    return {"ticker": ticker.upper(),
+            "next_earnings_date": nxt.isoformat() if nxt else None}
+
+
+@app.post("/api/projects/{project_id}/risk/evaluate")
+async def api_risk_evaluate(project_id: str):
+    from risk.kill_switch import evaluate_kill_switches
+    return {"breaches": evaluate_kill_switches(project_id)}
+
+
+@app.get("/projects/{project_id}/risk", response_class=HTMLResponse)
+async def risk_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("risk.html", {
+        "request": request, "project": project,
+    })
+
+
+# ---------- Position management (close, roll, take-profit, auto-roll) -------
+
+@app.post("/api/projects/{project_id}/contracts/{contract_id}/close")
+async def api_close_contract(request: Request, project_id: str, contract_id: int):
+    from db.repositories import WheelRepo
+    from execution import AlpacaClient
+    from risk.greeks_agg import _extract_underlying
+    project = _scoped_project(project_id, request)
+    target = None
+    for c in WheelRepo.list_open(project_id):
+        if c["contract_id"] == contract_id:
+            target = c
+            break
+    if target is None:
+        raise HTTPException(404, "Contract not found or already closed")
+    client = AlpacaClient(project)
+    sym = target["option_symbol"]
+    chain = client.option_chain_quotes(_extract_underlying(sym))
+    q = chain.get(sym) or {}
+    bid = q.get("bid") or 0
+    ask = q.get("ask") or 0
+    if ask <= 0:
+        raise HTTPException(400, "no ask price available")
+    mid = (bid + ask) / 2
+    qty = int(target.get("quantity") or 1)
+    try:
+        order = client.submit_limit_option(option_symbol=sym, qty=qty,
+                                           side="buy",
+                                           limit_price=round(mid, 2))
+        EventsRepo.log(project_id, "Manual", "BUY_TO_CLOSE", {
+            "ticker": target["ticker"], "option_symbol": sym,
+            "qty": qty, "limit_price": round(mid, 2), "order": order,
+            "narrative": [f"User manually closed {target['ticker']} {sym} "
+                          f"at ${mid:.2f} for {qty} contract(s)."],
+        })
+        return {"ok": True, "order": order}
+    except Exception as e:
+        raise HTTPException(400, f"close failed: {e}")
+
+
+@app.post("/api/projects/{project_id}/contracts/{contract_id}/roll")
+async def api_roll_contract(project_id: str, contract_id: int):
+    """Buy back the contract; Strategist will reopen on next cycle."""
+    return await api_close_contract(project_id, contract_id)
+
+
+@app.post("/api/projects/{project_id}/positions/{position_id}/close")
+async def api_close_position(request: Request, project_id: str, position_id: int):
+    from db.repositories import PositionsRepo
+    from execution import AlpacaClient
+    project = _scoped_project(project_id, request)
+    target = None
+    for p in PositionsRepo.list_open(project_id):
+        if p["position_id"] == position_id:
+            target = p
+            break
+    if target is None:
+        raise HTTPException(404, "Position not found")
+    client = AlpacaClient(project)
+    try:
+        result = client.liquidate_position(target["ticker"])
+        PositionsRepo.close(position_id, final_status="CLOSED")
+        EventsRepo.log(project_id, "Manual", "POSITION_CLOSED", {
+            "ticker": target["ticker"], "qty": target["quantity"],
+            "result": result,
+            "narrative": [f"User manually closed {target['quantity']} "
+                          f"shares of {target['ticker']}."],
+        })
+        return {"ok": True, "result": result}
+    except Exception as e:
+        raise HTTPException(400, f"close failed: {e}")
+
+
+@app.post("/api/projects/{project_id}/positions/take_profit_now")
+async def api_take_profit_now(project_id: str):
+    from risk.take_profit import evaluate_take_profit
+    return {"actions": evaluate_take_profit(project_id)}
+
+
+@app.post("/api/projects/{project_id}/positions/auto_roll_now")
+async def api_auto_roll_now(project_id: str):
+    from risk.auto_roll import evaluate_auto_roll
+    return {"actions": evaluate_auto_roll(project_id)}
+
+
+# ---------- IV rank + news -------------------------------------------------
+
+@app.get("/api/projects/{project_id}/iv_rank/{ticker}")
+async def api_iv_rank(project_id: str, ticker: str):
+    from analytics.iv_rank import get_iv_rank
+    return {"ticker": ticker.upper(),
+            "iv_rank": get_iv_rank(project_id, ticker)}
+
+
+@app.get("/api/projects/{project_id}/news/{ticker}")
+async def api_news(project_id: str, ticker: str):
+    from risk.news import get_news_sentiment
+    return get_news_sentiment(ticker)
+
+
+# ---------- Backtesting ----------------------------------------------------
+
+class BacktestIn(BaseModel):
+    name: str = "ad-hoc"
+    from_date: str    # YYYY-MM-DD
+    to_date: str
+    universe: list[str] | None = None
+
+
+@app.post("/api/projects/{project_id}/backtest/run")
+async def api_backtest_run(project_id: str, payload: BacktestIn):
+    from datetime import date as _date
+    from backtest import run_backtest
+    try:
+        fd = _date.fromisoformat(payload.from_date)
+        td = _date.fromisoformat(payload.to_date)
+    except Exception:
+        raise HTTPException(400, "from_date and to_date must be YYYY-MM-DD")
+    if td < fd:
+        raise HTTPException(400, "to_date before from_date")
+    try:
+        result = await asyncio.to_thread(
+            run_backtest, project_id,
+            from_date=fd, to_date=td,
+            universe=payload.universe, name=payload.name,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"backtest failed: {e}")
+
+
+@app.get("/api/projects/{project_id}/backtest/runs")
+async def api_backtest_list(project_id: str, limit: int = 25):
+    from backtest import list_runs
+    return list_runs(project_id, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/backtest/runs/{run_id}")
+async def api_backtest_get(project_id: str, run_id: int):
+    from backtest import get_run
+    r = get_run(project_id, run_id)
+    if r is None:
+        raise HTTPException(404, "run not found")
+    return r
+
+
+@app.get("/projects/{project_id}/backtest", response_class=HTMLResponse)
+async def backtest_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("backtest.html", {
+        "request": request, "project": project,
+    })
+
+
+# ---------- Strategy registry (for UI) -------------------------------------
+
+@app.get("/api/strategies")
+async def api_strategies():
+    from strategies import REGISTRY
+    return [{"name": s.name, "description": s.description}
+            for s in REGISTRY.values()]
+
+
+# ---------- Notifications --------------------------------------------------
+
+class ChannelIn(BaseModel):
+    channel_id: int | None = None
+    channel_type: str   # discord|email|slack|in_app
+    name: str
+    target: str
+    config: dict[str, Any] | None = None
+    events_filter: list[str] | None = None
+    enabled: bool = True
+
+
+class TestSendIn(BaseModel):
+    channel_id: int
+    title: str = "Test from Trader"
+    body: str | None = "If you can read this, the channel works."
+    severity: str = "info"
+
+
+@app.get("/api/projects/{project_id}/notifications/channels")
+async def api_channels_list(project_id: str):
+    from db.notifications_repo import ChannelsRepo
+    rows = ChannelsRepo.list(project_id)
+    # Mask the target for email/discord/slack so we don't leak credentials.
+    for r in rows:
+        t = r.get("target") or ""
+        if len(t) > 12:
+            r["target_masked"] = t[:6] + "…" + t[-4:]
+        else:
+            r["target_masked"] = t
+    return rows
+
+
+@app.post("/api/projects/{project_id}/notifications/channels")
+async def api_channels_upsert(project_id: str, payload: ChannelIn):
+    from db.notifications_repo import ChannelsRepo
+    try:
+        cid = ChannelsRepo.upsert(
+            project_id=project_id, channel_type=payload.channel_type,
+            name=payload.name, target=payload.target, config=payload.config,
+            events_filter=payload.events_filter, enabled=payload.enabled,
+            channel_id=payload.channel_id,
+        )
+        return {"ok": True, "channel_id": cid}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/projects/{project_id}/notifications/channels/{channel_id}")
+async def api_channels_delete(project_id: str, channel_id: int):
+    from db.notifications_repo import ChannelsRepo
+    ChannelsRepo.delete(project_id, channel_id)
+    return {"ok": True}
+
+
+@app.post("/api/projects/{project_id}/notifications/test")
+async def api_channels_test(project_id: str, payload: TestSendIn):
+    """Send a test notification through one specific channel."""
+    from db.notifications_repo import ChannelsRepo, NotificationsRepo
+    from notifications.adapters import ADAPTERS
+    channels = {c["channel_id"]: c for c in ChannelsRepo.list(project_id)}
+    ch = channels.get(payload.channel_id)
+    if ch is None:
+        raise HTTPException(404, "channel not found")
+    adapter = ADAPTERS.get(ch["channel_type"])
+    if adapter is None:
+        raise HTTPException(400, f"no adapter for {ch['channel_type']}")
+    nid = NotificationsRepo.create(
+        project_id=project_id, title=payload.title, body=payload.body,
+        severity=payload.severity, event_type="TEST",
+        channel_id=ch["channel_id"], status="queued",
+    )
+    try:
+        ok, err = adapter(ch, payload.title, payload.body or "", payload.severity)
+    except Exception as e:
+        ok, err = False, str(e)
+    NotificationsRepo.mark_sent(nid, ok=ok, error=err)
+    ChannelsRepo.record_send(ch["channel_id"], ok, error=err)
+    return {"ok": ok, "error": err, "notification_id": nid}
+
+
+@app.get("/api/projects/{project_id}/notifications")
+async def api_notifications_list(project_id: str, limit: int = 50,
+                                 unread_only: bool = False):
+    from db.notifications_repo import NotificationsRepo
+    return NotificationsRepo.list(project_id, limit=limit,
+                                  unread_only=unread_only)
+
+
+@app.get("/api/projects/{project_id}/notifications/unread_count")
+async def api_notifications_unread(project_id: str):
+    from db.notifications_repo import NotificationsRepo
+    return {"unread": NotificationsRepo.unread_count(project_id)}
+
+
+class MarkReadIn(BaseModel):
+    ids: list[int] | None = None
+    all_unread: bool = False
+
+
+@app.post("/api/projects/{project_id}/notifications/mark_read")
+async def api_notifications_mark_read(project_id: str, payload: MarkReadIn):
+    from db.notifications_repo import NotificationsRepo
+    n = NotificationsRepo.mark_read(project_id, ids=payload.ids,
+                                    all_unread=payload.all_unread)
+    return {"ok": True, "marked": n}
+
+
+@app.post("/api/projects/{project_id}/notifications/digest_now")
+async def api_digest_now(project_id: str):
+    from notifications.digest import send_daily_digest
+    return {"results": send_daily_digest(project_id)}
+
+
+# ---------- Wheel cycles ---------------------------------------------------
+
+@app.get("/api/projects/{project_id}/cycles")
+async def api_cycles_list(project_id: str, status: str | None = None,
+                          limit: int = 50):
+    from analytics.wheel_cycles import list_cycles
+    return list_cycles(project_id, status=status, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/cycles/{cycle_id}")
+async def api_cycle_detail(project_id: str, cycle_id: int):
+    from analytics.wheel_cycles import get_cycle
+    c = get_cycle(project_id, cycle_id)
+    if c is None:
+        raise HTTPException(404, "cycle not found")
+    return c
+
+
+# ---------- Reliability (orders + reconciliation + backups + metrics) -----
+
+@app.get("/api/projects/{project_id}/orders")
+async def api_orders_list(project_id: str, limit: int = 100,
+                          terminal: bool | None = None):
+    from ops.orders_tracker import list_orders
+    return list_orders(project_id, limit=limit, terminal=terminal)
+
+
+@app.post("/api/projects/{project_id}/orders/poll")
+async def api_orders_poll(project_id: str):
+    from ops.orders_tracker import poll_orders
+    return await asyncio.to_thread(poll_orders, project_id)
+
+
+@app.get("/api/projects/{project_id}/reconciliation/history")
+async def api_recon_history(project_id: str, limit: int = 20):
+    from ops.reconciliation import list_recon_history
+    return list_recon_history(project_id, limit=limit)
+
+
+@app.post("/api/projects/{project_id}/reconciliation/run")
+async def api_recon_run(project_id: str, auto_sync: bool = False):
+    from ops.reconciliation import run_reconciliation
+    return await asyncio.to_thread(run_reconciliation, project_id,
+                                   auto_sync=auto_sync)
+
+
+@app.get("/api/backups")
+async def api_backups_list(limit: int = 20):
+    from ops.backups import list_backups
+    return list_backups(limit=limit)
+
+
+@app.post("/api/backups/run")
+async def api_backups_run():
+    from ops.backups import run_backup
+    return await asyncio.to_thread(run_backup)
+
+
+@app.post("/api/backups/prune")
+async def api_backups_prune():
+    from ops.backups import prune_old_backups
+    return await asyncio.to_thread(prune_old_backups)
+
+
+@app.get("/api/metrics")
+async def api_metrics():
+    from ops.metrics import collect_metrics
+    return collect_metrics()
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics_prometheus():
+    from ops.metrics import prometheus_text
+    return prometheus_text()
+
+
+# ---------- LLM cost tracking + cache stats (Cat 8) -----------------------
+
+@app.get("/api/llm/usage")
+async def api_llm_usage(project_id: str | None = None, limit: int = 50):
+    from llm_ops.tracker import list_usage, usage_summary
+    return {
+        "summary": usage_summary(project_id),
+        "recent": list_usage(project_id, limit=limit),
+    }
+
+
+@app.get("/api/llm/cache_stats")
+async def api_llm_cache_stats():
+    from llm_ops.cache import cache_stats
+    return cache_stats()
+
+
+# ---------- AI recommendations (Cat 10.1) --------------------------------
+
+@app.post("/api/projects/{project_id}/recommendations/build")
+async def api_recs_build(project_id: str):
+    from intelligence.recommendations import build_recommendations
+    return await asyncio.to_thread(build_recommendations, project_id)
+
+
+@app.get("/api/projects/{project_id}/recommendations")
+async def api_recs_list(project_id: str, status: str | None = None,
+                        limit: int = 20):
+    from intelligence.recommendations import list_recommendations
+    return list_recommendations(project_id, status=status, limit=limit)
+
+
+@app.post("/api/projects/{project_id}/recommendations/{rec_id}/apply")
+async def api_recs_apply(project_id: str, rec_id: int):
+    from intelligence.recommendations import apply_recommendation
+    return apply_recommendation(project_id, rec_id)
+
+
+# ---------- Anomalies (Cat 10.3) -----------------------------------------
+
+@app.post("/api/projects/{project_id}/anomalies/detect")
+async def api_anom_detect(project_id: str):
+    from intelligence.anomalies import detect_anomalies
+    return {"anomalies": await asyncio.to_thread(detect_anomalies, project_id)}
+
+
+@app.get("/api/projects/{project_id}/anomalies")
+async def api_anom_list(project_id: str, limit: int = 50):
+    from intelligence.anomalies import list_anomalies
+    return list_anomalies(project_id, limit=limit)
+
+
+# ---------- Strategy templates (Cat 9.3) ---------------------------------
+
+@app.get("/api/strategy_templates")
+async def api_templates_list():
+    from intelligence.strategy_templates import list_templates
+    return list_templates()
+
+
+@app.post("/api/projects/{project_id}/strategy_templates/{tid}/apply")
+async def api_template_apply(project_id: str, tid: str):
+    from intelligence.strategy_templates import apply_template
+    out = apply_template(project_id, tid)
+    if "error" in out:
+        raise HTTPException(400, out["error"])
+    return out
+
+
+# ---------- Market Outlook (top performers + 30/60/90 predictions) -----------
+
+@app.get("/projects/{project_id}/outlook", response_class=HTMLResponse)
+async def outlook_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("outlook.html", {
+        "request": request, "project": project,
+    })
+
+
+@app.get("/api/projects/{project_id}/outlook/top_performers")
+async def api_outlook_top(project_id: str, limit: int = 25):
+    from intelligence.market_outlook import top_performers
+    return await asyncio.to_thread(top_performers, project_id, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/outlook/predict/{ticker}")
+async def api_outlook_predict(project_id: str, ticker: str, force: bool = False):
+    from intelligence.market_outlook import predict
+    out = await asyncio.to_thread(predict, project_id, ticker, force=force)
+    if "error" in out:
+        raise HTTPException(400, out["error"])
+    return out
+
+
+@app.get("/api/projects/{project_id}/account/raw")
+async def api_account_raw(request: Request, project_id: str):
+    """Dump every field the configured broker returns for the account —
+    used to diagnose buying-power, PDT, and account-status issues."""
+    project = _scoped_project(project_id, request)
+    from execution import get_broker, BrokerNotConfigured
+    try:
+        return await asyncio.to_thread(get_broker(project).get_account_raw)
+    except BrokerNotConfigured as e:
+        return {"broker_state": "needs_oauth",
+                "message": str(e),
+                "broker_type": project.broker_type}
+    except NotImplementedError as e:
+        return {"broker_state": "phase2_pending",
+                "message": str(e),
+                "broker_type": project.broker_type}
+    except Exception as e:
+        broker_label = "ETrade" if project.broker_type == "etrade" else "Alpaca"
+        raise HTTPException(502, f"{broker_label} error: {e}")
+
+
+@app.get("/api/projects/{project_id}/dashboard_overview")
+async def api_dashboard_overview(request: Request, project_id: str):
+    """Top-of-dashboard summary: starting balance, current equity,
+    short-term gain (7d), and long-term gain (all-time)."""
+    project = _scoped_project(project_id, request)
+    from datetime import datetime, timedelta, timezone
+    from execution import get_broker, BrokerNotConfigured
+    from db.analytics_repos import PortfolioSnapshotsRepo
+
+    def _compute():
+        # Current equity from the configured broker. ETrade projects
+        # without OAuth return None — UI shows "—" for unavailable data.
+        broker_ok = True
+        current_equity: float | None = None
+        current_cash: float | None = None
+        try:
+            account = get_broker(project).get_account()
+            current_equity = float(account.get("equity") or 0)
+            current_cash = float(account.get("cash") or 0)
+        except (BrokerNotConfigured, NotImplementedError):
+            broker_ok = False
+        except Exception:
+            broker_ok = False
+
+        # Starting balance from earliest snapshot, fall back to project's max
+        # equity allocation (i.e. what the user said they'd commit).
+        earliest = PortfolioSnapshotsRepo.earliest(project_id)
+        if earliest and earliest.get("equity"):
+            starting_balance = earliest["equity"]
+            starting_at = earliest["t"]
+        else:
+            starting_balance = float(project.max_equity_allocation or 0)
+            starting_at = None
+
+        # 7-day reference snapshot
+        seven_days_ago = datetime.now(tz=timezone.utc) - timedelta(days=7)
+        week_ref = PortfolioSnapshotsRepo.at_or_after(project_id, seven_days_ago)
+        week_start_equity = (week_ref or {}).get("equity")
+
+        def _gain(start):
+            # Without live broker data we have no current equity to subtract,
+            # so reporting "+/- $X" would be a fake number. Return None and
+            # the dashboard shows "—" instead.
+            if not broker_ok or current_equity is None:
+                return {"dollars": None, "pct": None, "ref_equity": start}
+            if not start or start <= 0:
+                return {"dollars": None, "pct": None, "ref_equity": start}
+            d = current_equity - start
+            return {
+                "dollars": round(d, 2),
+                "pct": round((d / start) * 100, 2),
+                "ref_equity": round(start, 2),
+            }
+
+        return {
+            "current_equity": round(current_equity, 2) if current_equity is not None else None,
+            "current_cash": round(current_cash, 2) if current_cash is not None else None,
+            "starting_balance": round(starting_balance, 2),
+            "starting_at": starting_at,
+            "short_term": _gain(week_start_equity),     # last 7 days
+            "long_term": _gain(starting_balance),       # since inception
+            "short_term_period_days": 7,
+            "broker_state": "ready" if broker_ok else "not_connected",
+        }
+
+    return await asyncio.to_thread(_compute)
+
+
+@app.get("/api/projects/{project_id}/optimize/preview")
+async def api_optimize_preview(project_id: str, strategy: str):
+    """Preview what settings the Optimize button would apply."""
+    from intelligence.optimizer import preview
+    out = await asyncio.to_thread(preview, project_id, strategy)
+    if "error" in out:
+        raise HTTPException(400, out["error"])
+    return out
+
+
+@app.post("/api/projects/{project_id}/optimize")
+async def api_optimize_apply(project_id: str, body: dict):
+    """Apply the cash-tier-aware optimized settings for the given strategy."""
+    strategy = (body or {}).get("strategy")
+    if not strategy:
+        raise HTTPException(400, "strategy required in body")
+    from intelligence.optimizer import optimize
+    out = await asyncio.to_thread(optimize, project_id, strategy)
+    if "error" in out:
+        raise HTTPException(400, out["error"])
+    return out
+
+
+@app.post("/api/projects/{project_id}/alpaca_position/close")
+async def api_close_alpaca_position(request: Request, project_id: str, body: dict):
+    """Close any open position (stock or option) by symbol via the project's
+    configured broker. Submits at market.
+    """
+    project = _scoped_project(project_id, request)
+    symbol = (body or {}).get("symbol")
+    if not symbol:
+        raise HTTPException(400, "symbol required in body")
+    from execution import get_broker, BrokerNotConfigured
+    from db.repositories import EventsRepo
+    try:
+        client = get_broker(project)
+    except BrokerNotConfigured as e:
+        raise HTTPException(400, str(e))
+    try:
+        order = await asyncio.to_thread(client.liquidate_position, symbol)
+        EventsRepo.log(project_id, "User", "MANUAL_CLOSE", {
+            "symbol": symbol, "order": order,
+            "narrative": [f"User manually closed Alpaca position {symbol}."],
+        })
+        if isinstance(order, dict) and order.get("error"):
+            raise HTTPException(400, f"close failed: {order['error']}")
+        return {"ok": True, "order": order}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"close failed: {e}")
+
+
+# ---------- Trade journal export (Cat 11.1) ------------------------------
+
+@app.get("/api/projects/{project_id}/journal/export.csv")
+async def api_journal_csv(project_id: str, since_days: int | None = None):
+    from datetime import datetime, timedelta, timezone
+    from fastapi.responses import Response
+    from exports.journal import trade_journal_csv
+    since = None
+    if since_days:
+        since = datetime.now(tz=timezone.utc) - timedelta(days=int(since_days))
+    csv_text = trade_journal_csv(project_id, since=since)
+    return Response(content=csv_text, media_type="text/csv",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="trades_{project_id}.csv"'})
+
+
+# ---------- Cross-tenant portfolio (Cat 12.2) ----------------------------
+
+@app.get("/api/portfolio")
+async def api_portfolio_all():
+    from api.portfolio import aggregate_all
+    return aggregate_all()
+
+
+@app.get("/portfolio", response_class=HTMLResponse)
+async def portfolio_page(request: Request):
+    return templates.TemplateResponse("portfolio.html", {"request": request})
+
+
+@app.get("/projects/{project_id}/intelligence", response_class=HTMLResponse)
+async def intelligence_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("intelligence.html", {
+        "request": request, "project": project,
+    })
+
+
+@app.get("/cost", response_class=HTMLResponse)
+async def cost_page(request: Request):
+    return templates.TemplateResponse("cost.html", {"request": request})
+
+
+@app.get("/projects/{project_id}/reliability", response_class=HTMLResponse)
+async def reliability_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("reliability.html", {
+        "request": request, "project": project,
+    })
+
+
+@app.get("/projects/{project_id}/cycles", response_class=HTMLResponse)
+async def cycles_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("cycles.html", {
+        "request": request, "project": project,
+    })
+
+
+@app.get("/projects/{project_id}/notifications", response_class=HTMLResponse)
+async def notifications_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("notifications.html", {
+        "request": request, "project": project,
+    })
+
+
+_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_SNAPSHOT_TTL = 5.0   # seconds
+
+
+@app.get("/api/projects/{project_id}/snapshot")
+async def api_project_snapshot(request: Request, project_id: str):
+    import time as _time
+    now = _time.monotonic()
+    cache_key = (project_id, getattr(request.state, "user_id", None))
+    cached = _SNAPSHOT_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _SNAPSHOT_TTL:
+        return cached[1]
+    uid = getattr(request.state, "user_id", None)
+    is_admin = bool(getattr(request.state, "is_admin", False))
+    result = await asyncio.to_thread(_build_snapshot, project_id, uid, is_admin)
+    _SNAPSHOT_CACHE[cache_key] = (now, result)
+    return result
+
+
+def _build_snapshot(project_id: str, user_id: str | None = None,
+                    is_admin: bool = False) -> dict[str, Any]:
+    """Consolidated view used by the dashboard auto-refresh — no JSON payloads."""
+    project = ProjectsRepo.get(project_id, user_id=None if is_admin else user_id)
+    if project is None:
+        raise HTTPException(404, "Project not found")
+
+    account: dict[str, Any] = {"cash": None, "buying_power": None,
+                               "equity": None, "portfolio_value": None,
+                               "error": None}
+    clock = {"is_open": None, "next_open": None, "next_close": None,
+             "error": None}
+    positions_live: list[dict[str, Any]] = []
+
+    broker_type = (getattr(project, "broker_type", "alpaca") or "alpaca")
+    broker_state = "ready"   # 'ready' | 'needs_oauth' | 'phase2_pending'
+
+    if broker_type == "etrade":
+        # ETrade Phase 1: tokens may be missing (user hasn't OAuthed yet)
+        # OR tokens may be present but the trading endpoints are still
+        # stubbed for Phase 2. Don't call Alpaca regardless.
+        if not getattr(project, "etrade_access_token", ""):
+            broker_state = "needs_oauth"
+            account["error"] = (
+                "ETrade is not yet connected. "
+                "Click 'Connect ETrade' to authorize."
+            )
+        else:
+            broker_state = "phase2_pending"
+            account["error"] = (
+                "ETrade is connected, but the trading endpoints land in "
+                "Phase 2. The runner is skipping this project for now."
+            )
+
+    else:
+        # Alpaca path (default).
+        try:
+            ac = AlpacaClient(project)
+            try:
+                account.update(ac.get_account())
+            except Exception as e:
+                account["error"] = str(e)
+            try:
+                clock.update(ac.get_market_clock())
+                for k in ("next_open", "next_close", "timestamp"):
+                    if clock.get(k) is not None:
+                        clock[k] = str(clock[k])
+            except Exception as e:
+                clock["error"] = str(e)
+            try:
+                positions_live = ac.list_positions()
+            except Exception:
+                positions_live = []
+        except Exception as e:
+            account["error"] = str(e)
+
+    raw_events = EventsRepo.recent(project_id, limit=80)
+    pipeline = summarize_pipeline(raw_events)
+    timeline = [humanize_event(e) for e in raw_events[:30]]
+
+    # cycles-per-minute for last 30 minutes (for the activity bar chart)
+    from collections import Counter
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(tz=timezone.utc)
+    bucket: Counter = Counter()
+    for e in raw_events:
+        if e.get("event_type") != "LOOP":
+            continue
+        ts = e.get("created_at")
+        try:
+            t = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        if (now - t) > timedelta(minutes=30):
+            continue
+        bucket[t.replace(second=0, microsecond=0)] += 1
+    cycles_chart = []
+    for i in range(29, -1, -1):
+        slot = (now - timedelta(minutes=i)).replace(second=0, microsecond=0)
+        cycles_chart.append({"t": slot.strftime("%H:%M"), "n": bucket.get(slot, 0)})
+
+    db_positions = PositionsRepo.list_open(project_id)
+    contracts = WheelRepo.list_open(project_id)
+
+    # Greeks intentionally NOT computed in snapshot — each aggregation does
+    # one Alpaca option-chain call per underlying which is slow enough to
+    # starve other endpoints when the dashboard polls every 5 s. The Risk
+    # page fetches /risk/greeks on its own cadence.
+    greeks = None
+
+    # Active kill switches and most recent breach (for the banner)
+    try:
+        from db.risk_repos import RiskLimitsRepo
+        risk_limits = RiskLimitsRepo.list(project_id)
+    except Exception:
+        risk_limits = []
+    recent_breach = None
+    for lim in risk_limits:
+        if lim.get("last_breached_at"):
+            if recent_breach is None or lim["last_breached_at"] > recent_breach["last_breached_at"]:
+                recent_breach = lim
+
+    return {
+        "project": {
+            "project_id": project.project_id,
+            "project_name": project.project_name,
+            "alpaca_base_url": project.alpaca_base_url,
+            "is_active": project.is_active,
+            "broker_type": broker_type,
+            "broker_state": broker_state,
+            "etrade_environment": getattr(project, "etrade_environment", None),
+        },
+        "account": account,
+        "clock": clock,
+        "pipeline": pipeline,
+        "timeline": timeline,
+        "cycles_chart": cycles_chart,
+        "positions_db": db_positions,
+        "positions_live": positions_live,
+        "contracts": contracts,
+        "greeks": greeks,
+        "risk_limits": risk_limits,
+        "recent_breach": recent_breach,
+        "warnings": _build_warnings(account, clock, raw_events, project),
+    }
+
+
+def _build_warnings(account: dict[str, Any], clock: dict[str, Any],
+                    events: list[dict[str, Any]], project: Any) -> list[dict[str, str]]:
+    warns: list[dict[str, str]] = []
+    broker_type = (getattr(project, "broker_type", "alpaca") or "alpaca")
+
+    if account.get("error"):
+        if broker_type == "etrade":
+            if not getattr(project, "etrade_access_token", ""):
+                warns.append({
+                    "level": "info",
+                    "title": "ETrade not connected yet",
+                    "detail": "Complete the OAuth flow to authorize this "
+                              "project. Click the 'Connect ETrade' link.",
+                })
+            else:
+                warns.append({
+                    "level": "info",
+                    "title": "ETrade trading endpoints are in Phase 2",
+                    "detail": "OAuth tokens are stored, but live order "
+                              "submission ships in the next phase. The "
+                              "runner skips this project until then.",
+                })
+        else:
+            warns.append({"level": "error",
+                          "title": "Alpaca account unreachable",
+                          "detail": account["error"]})
+    elif broker_type == "alpaca":
+        bp = account.get("buying_power") or 0
+        cash = account.get("cash") or 0
+        if (bp or 0) == 0 and (cash or 0) == 0:
+            warns.append({
+                "level": "warn",
+                "title": "Paper account has $0 buying power",
+                "detail": "Complete the Alpaca application at app.alpaca.markets "
+                          "(yellow 'Complete Application' banner) — the account auto-funds "
+                          "to $100,000 once approved.",
+            })
+    provider = (AppSettings.get("llm_provider", "anthropic") or "anthropic").lower()
+    if provider == "google":
+        if AppSettings.get("google_api_key") in (None, ""):
+            warns.append({
+                "level": "info",
+                "title": "Gemini key not set — running in deterministic fallback",
+                "detail": "Add google_api_key in Global Settings (free at aistudio.google.com).",
+            })
+    else:
+        if AppSettings.get("anthropic_api_key") in (None, ""):
+            warns.append({
+                "level": "info",
+                "title": "Claude key not set — running in deterministic fallback",
+                "detail": "Add anthropic_api_key in Global Settings, or switch llm_provider=google.",
+            })
+    # Inspect recent DECIDE rejection reasons for LLM credit / auth issues —
+    # but only for the *currently active* provider, and only within the last
+    # 5 minutes (otherwise old events from a previous provider stay sticky).
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(tz=timezone.utc)
+    for e in events[:10]:
+        if e.get("node_name") != "Strategist" or e.get("event_type") != "DECIDE":
+            continue
+        ts = e.get("created_at")
+        try:
+            t = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            if (now - t) > timedelta(minutes=5):
+                continue
+        except Exception:
+            continue
+        payload = e.get("payload") or {}
+        rejs = payload.get("rejections") if isinstance(payload, dict) else None
+        if not rejs:
+            continue
+        reasons = " ".join(str(r.get("reason", "")) for r in rejs).lower()
+        if provider == "anthropic":
+            if "credit balance is too low" in reasons or "billing" in reasons:
+                warns.append({
+                    "level": "error",
+                    "title": "Anthropic API credit exhausted",
+                    "detail": "Add credit at console.anthropic.com → Plans & Billing, "
+                              "or switch llm_provider=google in Global Settings.",
+                })
+                break
+            if "invalid_api_key" in reasons or "unauthorized" in reasons:
+                warns.append({
+                    "level": "error",
+                    "title": "Invalid Anthropic API key",
+                    "detail": "Update anthropic_api_key in Global Settings.",
+                })
+                break
+        elif provider == "google":
+            if "quota" in reasons or "rate limit" in reasons or "resource_exhausted" in reasons:
+                warns.append({
+                    "level": "error",
+                    "title": "Gemini quota / rate-limit hit",
+                    "detail": "Wait a minute or upgrade tier at aistudio.google.com.",
+                })
+                break
+            if "api key not valid" in reasons or "invalid_argument" in reasons or "permission_denied" in reasons:
+                warns.append({
+                    "level": "error",
+                    "title": "Invalid Gemini API key",
+                    "detail": "Update google_api_key in Global Settings.",
+                })
+                break
+    # Latest error event in a tight recent window (last 15 min). Without
+    # the window, stale errors from before fixes shipped keep surfacing as
+    # warnings indefinitely.
+    err_cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=15)
+    for e in events[:50]:
+        if e.get("event_type") != "ERROR":
+            continue
+        ts = e.get("created_at")
+        try:
+            t = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        if t < err_cutoff:
+            continue
+        warns.append({"level": "error",
+                      "title": f"Recent error in {e.get('node_name')}",
+                      "detail": str(e.get('payload', {}).get('err', ''))[:200]})
+        break
+    return warns
+
+
+# ---------- REST: global settings --------------------------------------------
+
+@app.get("/api/settings")
+async def api_list_settings():
+    rows = AppSettings.list_all()
+    return [{"key": r.key, "value": (None if r.is_secret else r.value),
+             "value_type": r.value_type, "category": r.category,
+             "description": r.description, "is_secret": r.is_secret} for r in rows]
+
+
+@app.post("/api/settings")
+async def api_set_setting(payload: SettingIn):
+    AppSettings.set(payload.key, payload.value, value_type=payload.value_type,
+                    category=payload.category, description=payload.description,
+                    is_secret=payload.is_secret)
+    return {"ok": True}
+
+
+# ---------- REST: projects ----------------------------------------------------
+
+@app.get("/api/projects")
+async def api_list_projects(request: Request):
+    uid = getattr(request.state, "user_id", None)
+    is_admin = bool(getattr(request.state, "is_admin", False))
+    return [
+        {"project_id": p.project_id, "project_name": p.project_name,
+         "alpaca_base_url": p.alpaca_base_url, "alpaca_data_feed": p.alpaca_data_feed,
+         "max_equity_allocation": p.max_equity_allocation, "is_active": p.is_active}
+        for p in ProjectsRepo.list_all(user_id=None if is_admin else uid)
+    ]
+
+
+@app.post("/api/projects")
+async def api_upsert_project(request: Request, payload: ProjectIn):
+    uid = getattr(request.state, "user_id", None)
+    is_admin = bool(getattr(request.state, "is_admin", False))
+    # If updating an existing project, enforce ownership.
+    existing = ProjectsRepo.get(payload.project_id,
+                                user_id=None if is_admin else uid)
+    if existing is None:
+        # Check whether it exists at all (without owner scope)
+        if ProjectsRepo.get(payload.project_id) is not None:
+            raise HTTPException(404, "Project not found")
+    project = TradingProject(
+        project_id=payload.project_id,
+        project_name=payload.project_name,
+        alpaca_api_key=payload.alpaca_api_key,
+        alpaca_secret_key=payload.alpaca_secret_key,
+        alpaca_base_url=payload.alpaca_base_url,
+        alpaca_data_feed=payload.alpaca_data_feed,
+        max_equity_allocation=payload.max_equity_allocation,
+        is_active=payload.is_active,
+        user_id=existing.user_id if existing else uid,
+        broker_type=payload.broker_type or "alpaca",
+        etrade_consumer_key=payload.etrade_consumer_key,
+        etrade_consumer_secret=payload.etrade_consumer_secret,
+        etrade_access_token=existing.etrade_access_token if existing else "",
+        etrade_access_token_secret=existing.etrade_access_token_secret if existing else "",
+        etrade_account_id_key=existing.etrade_account_id_key if existing else "",
+        etrade_environment=payload.etrade_environment or "sandbox",
+    )
+    ProjectsRepo.upsert(project)
+    return {"ok": True}
+
+
+@app.delete("/api/projects/{project_id}")
+async def api_delete_project(request: Request, project_id: str):
+    # Verify ownership before deleting.
+    _scoped_project(project_id, request)
+    ProjectsRepo.delete(project_id)
+    return {"ok": True}
+
+
+# ---------- REST: per-project settings ---------------------------------------
+
+@app.get("/api/projects/{project_id}/settings")
+async def api_list_project_settings(project_id: str):
+    rows = ProjectSettings.list_for_project(project_id)
+    return [{"key": r.key, "value": r.value, "value_type": r.value_type,
+             "description": r.description} for r in rows]
+
+
+@app.post("/api/projects/{project_id}/settings")
+async def api_set_project_setting(project_id: str, payload: ProjectSettingIn):
+    ProjectSettings.set(project_id, payload.key, payload.value, value_type=payload.value_type)
+    return {"ok": True}
+
+
+@app.get("/api/projects/{project_id}/events")
+async def api_project_events(project_id: str, limit: int = 50):
+    return EventsRepo.recent(project_id, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/logs")
+async def api_project_logs(project_id: str,
+                           node: str | None = None,
+                           event_type: str | None = None,
+                           search: str | None = None,
+                           limit: int = 100,
+                           before_id: int | None = None,
+                           humanize: bool = True):
+    raw = EventsRepo.query(project_id, node=node or None,
+                           event_type=event_type or None,
+                           search=search or None,
+                           limit=limit, before_id=before_id)
+    if humanize:
+        return [{**humanize_event(e), "payload": e.get("payload")} for e in raw]
+    return raw
+
+
+@app.get("/projects/{project_id}/logs", response_class=HTMLResponse)
+async def project_logs_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("logs.html", {
+        "request": request,
+        "project": project,
+    })
+
+
+@app.get("/logs", response_class=HTMLResponse)
+async def logs_picker(request: Request):
+    """When clicked from top nav: redirect to first active project's logs,
+    or render a chooser if multiple projects exist."""
+    uid = getattr(request.state, "user_id", None)
+    is_admin = bool(getattr(request.state, "is_admin", False))
+    projects = ProjectsRepo.list_all(user_id=None if is_admin else uid)
+    if not projects:
+        raise HTTPException(404, "No projects yet — add one from the dashboard.")
+    if len(projects) == 1:
+        return RedirectResponse(f"/projects/{projects[0].project_id}/logs")
+    # Multiple — render dashboard so user can pick.
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request, "projects": projects,
+        "runner_active": _runner is not None,
+    })
+
+
+@app.get("/help", response_class=HTMLResponse)
+async def help_page(request: Request):
+    return templates.TemplateResponse("help.html", {"request": request})
+
+
+@app.get("/api/projects/{project_id}/positions")
+async def api_project_positions(project_id: str):
+    return PositionsRepo.list_open(project_id)
+
+
+@app.post("/api/projects/{project_id}/reset_paper")
+async def api_reset_paper(request: Request, project_id: str, cash: float = 100000.0):
+    from execution import AlpacaClient
+    project = _scoped_project(project_id, request)
+    if (project.broker_type or "alpaca") != "alpaca":
+        raise HTTPException(400,
+            "Reset Paper Account is an Alpaca-only feature. "
+            "ETrade sandbox accounts are managed directly at apisb.etrade.com.")
+    if "paper-api" not in (project.alpaca_base_url or ""):
+        raise HTTPException(400, "Refusing to reset a non-paper account.")
+    try:
+        result = AlpacaClient(project).reset_paper_account(cash=cash)
+        EventsRepo.log(project_id, "Admin", "RESET_PAPER", {"cash": cash, "result": result})
+        return {"ok": True, "result": result}
+    except Exception as e:
+        raise HTTPException(400, f"Reset failed: {e}")
+
+
+@app.get("/api/projects/{project_id}/contracts")
+async def api_project_contracts(project_id: str):
+    return WheelRepo.list_open(project_id)
+
+
+# ---------- REST: analytics --------------------------------------------------
+
+@app.get("/api/projects/{project_id}/performance/summary")
+async def api_performance_summary(project_id: str, period: str = "all"):
+    from analytics.pnl_calculator import metrics_summary
+    return metrics_summary(project_id, period=period)
+
+
+@app.get("/api/projects/{project_id}/performance/equity_curve")
+async def api_equity_curve(project_id: str, period: str = "month"):
+    from analytics.pnl_calculator import equity_curve_points
+    return equity_curve_points(project_id, period=period)
+
+
+@app.get("/api/projects/{project_id}/performance/closed_trades")
+async def api_closed_trades(project_id: str, ticker: str | None = None,
+                            limit: int = 100):
+    from db.analytics_repos import ClosedContractsRepo
+    return ClosedContractsRepo.list(project_id, ticker=ticker, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/performance/by_ticker")
+async def api_perf_by_ticker(project_id: str, since_days: int = 90,
+                             min_trades: int = 1):
+    from datetime import datetime, timedelta, timezone
+    from db.analytics_repos import ClosedContractsRepo
+    since = datetime.now(tz=timezone.utc) - timedelta(days=since_days)
+    return ClosedContractsRepo.by_ticker(project_id, since=since,
+                                         min_trades=min_trades)
+
+
+@app.get("/api/projects/{project_id}/performance/attribution")
+async def api_attribution(project_id: str, dimension: str = "delta",
+                          since_days: int = 365, min_trades: int = 1):
+    from analytics.attribution import attribution_by_dimension
+    return attribution_by_dimension(project_id, dimension=dimension,
+                                    since_days=since_days,
+                                    min_trades=min_trades)
+
+
+@app.post("/api/projects/{project_id}/performance/snapshot")
+async def api_take_snapshot_now(project_id: str):
+    from analytics.snapshotter import take_snapshot
+    sid = take_snapshot(project_id)
+    return {"ok": sid is not None, "snapshot_id": sid}
+
+
+@app.post("/api/projects/{project_id}/performance/detect_closures")
+async def api_detect_now(project_id: str):
+    from analytics.closure_detector import detect_closures
+    return detect_closures(project_id)
+
+
+@app.get("/projects/{project_id}/performance", response_class=HTMLResponse)
+async def performance_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("performance.html", {
+        "request": request, "project": project,
+    })
+
+
+@app.get("/projects/{project_id}/analysis", response_class=HTMLResponse)
+async def analysis_page(request: Request, project_id: str):
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("analysis.html", {
+        "request": request, "project": project,
+    })
+
+
+@app.get("/api/health")
+async def health():
+    return {"ok": True, "runner_active": _runner is not None}

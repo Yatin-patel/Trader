@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Two-factor code · Autonomous Trader</title>
+  <link rel="stylesheet" href="/static/app.css?v=10">
+</head>
+<body class="auth-body">
+  <main class="auth-shell">
+    <aside class="auth-hero">
+      <div class="auth-hero-mark">⚡</div>
+      <div class="auth-hero-title">One more step</div>
+      <div class="auth-hero-tag">
+        Two-factor authentication is enabled on this account. Enter the
+        6-digit code from your authenticator app to continue.
+      </div>
+    </aside>
+
+    <section class="auth-panel">
+      <header class="auth-panel-head">
+        <h1>Verify your code</h1>
+        <p class="muted">Codes refresh every 30 seconds.</p>
+      </header>
+      <form method="post" action="/login/2fa" class="auth-form">
+        {% if error %}
+        <div class="alert error"><div class="alert-detail">{{ error }}</div></div>
+        {% endif %}
+        <input type="hidden" name="pending" value="{{ pending }}">
+        <label class="auth-label">
+          <span>Authenticator code</span>
+          <input type="text" name="code" required pattern="[0-9]{6}" maxlength="6"
+                 autocomplete="one-time-code" inputmode="numeric"
+                 autofocus placeholder="123456"
+                 style="letter-spacing: 0.3em; font-family: var(--font-mono); font-size: 18px;">
+        </label>
+        <button type="submit" class="btn primary auth-submit">Verify</button>
+        <div class="auth-foot">
+          Wrong account? <a href="/logout">Cancel and start over</a>
+        </div>
+      </form>
+    </section>
+  </main>
+  <script src="/static/toast.js?v=2"></script>
+</body>
+</html>

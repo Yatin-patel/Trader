@@ -1,0 +1,96 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }} · Performance{% endblock %}
+{% block content %}
+<section class="panel" data-project-id="{{ project.project_id }}" id="perf-root">
+  <header class="panel-head">
+    <div>
+      <h1>Performance</h1>
+      <span class="muted">
+        <a href="/projects/{{ project.project_id }}">← back to dashboard</a>
+        &nbsp;·&nbsp; {{ project.project_name }}
+      </span>
+    </div>
+    <div class="status-bar">
+      <label class="muted" style="font-size:12px;">
+        Period
+        <select id="perf-period">
+          <option value="today">Today</option>
+          <option value="week">This Week</option>
+          <option value="month" selected>This Month</option>
+          <option value="ytd">YTD</option>
+          <option value="all">All Time</option>
+        </select>
+      </label>
+      <button class="btn small ghost" id="perf-refresh">Refresh</button>
+    </div>
+  </header>
+</section>
+
+<!-- Stat cards -->
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Realized P&amp;L</div>
+    <div class="card-value" id="card-realized">—</div>
+    <div class="card-sub muted" id="card-realized-sub"></div>
+  </div>
+  <div class="card">
+    <div class="card-label">Unrealized P&amp;L</div>
+    <div class="card-value" id="card-unrealized">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Win Rate</div>
+    <div class="card-value" id="card-winrate">—</div>
+    <div class="card-sub muted" id="card-trades"></div>
+  </div>
+  <div class="card">
+    <div class="card-label">Total Premium</div>
+    <div class="card-value" id="card-premium">—</div>
+  </div>
+</section>
+
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Avg Winner</div>
+    <div class="card-value" id="card-avg-win">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Avg Loser</div>
+    <div class="card-value" id="card-avg-loss">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Profit Factor</div>
+    <div class="card-value" id="card-pf">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Max Drawdown</div>
+    <div class="card-value" id="card-dd">—</div>
+  </div>
+</section>
+
+<!-- Equity curve -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Equity Curve</h2>
+    <span class="muted" id="curve-summary"></span>
+  </header>
+  <canvas id="equity-curve" height="240"></canvas>
+</section>
+
+<!-- Closed trades -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Closed Trades</h2>
+    <span class="muted" id="trades-count">—</span>
+  </header>
+  <table class="data" id="closed-trades">
+    <thead>
+      <tr><th>Closed</th><th>Ticker</th><th>Phase</th><th>Strike</th>
+          <th>Qty</th><th>Days</th><th>Premium</th><th>Close Cost</th>
+          <th>P/L</th><th>Reason</th></tr>
+    </thead>
+    <tbody><tr><td colspan="10" class="empty">No closed trades yet.</td></tr></tbody>
+  </table>
+</section>
+
+<script src="/static/performance.js"></script>
+{% endblock %}

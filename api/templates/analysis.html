@@ -1,0 +1,65 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }} · Analysis{% endblock %}
+{% block content %}
+<section class="panel" data-project-id="{{ project.project_id }}" id="analysis-root">
+  <header class="panel-head">
+    <div>
+      <h1>Analysis</h1>
+      <span class="muted">
+        <a href="/projects/{{ project.project_id }}">← back to dashboard</a>
+        &nbsp;·&nbsp; {{ project.project_name }}
+      </span>
+    </div>
+  </header>
+</section>
+
+<section class="panel">
+  <header class="panel-head">
+    <h2>Per-Ticker Performance</h2>
+    <div>
+      <label class="muted" style="font-size:12px;">
+        Min trades
+        <input type="number" id="min-trades" value="1" min="1" max="100" style="width:60px;">
+      </label>
+      <label class="muted" style="font-size:12px; margin-left:10px;">
+        Lookback (days)
+        <input type="number" id="since-days" value="90" min="1" max="3650" style="width:80px;">
+      </label>
+      <button class="btn small primary" id="heatmap-refresh">Refresh</button>
+    </div>
+  </header>
+  <table class="data" id="heatmap-table">
+    <thead>
+      <tr>
+        <th>Ticker</th><th>Trades</th><th>Win Rate</th><th>Total P/L</th>
+        <th>Avg P/L</th><th>Avg Days</th><th>Total Premium</th>
+        <th>Biggest Win</th><th>Biggest Loss</th>
+      </tr>
+    </thead>
+    <tbody><tr><td colspan="9" class="empty">No closed trades yet.</td></tr></tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <header class="panel-head">
+    <h2>Strategy Attribution</h2>
+    <div>
+      <label class="muted" style="font-size:12px;">
+        Dimension
+        <select id="attr-dim">
+          <option value="delta">Delta band</option>
+          <option value="dte">Days to expiration</option>
+          <option value="phase">Strategy phase</option>
+          <option value="ticker">Ticker</option>
+          <option value="day_of_week">Day of week</option>
+          <option value="underlying_price">Underlying price</option>
+        </select>
+      </label>
+      <button class="btn small primary" id="attr-refresh">Refresh</button>
+    </div>
+  </header>
+  <div id="attr-bars" style="padding: 16px 20px;"></div>
+</section>
+
+<script src="/static/analysis.js"></script>
+{% endblock %}

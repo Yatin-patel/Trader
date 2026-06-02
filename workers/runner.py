@@ -1,0 +1,229 @@
+"""Multi-tenant runner.
+
+Spawns one async task per active project and monitors `trading_projects` for
+new tenants on a configurable refresh interval.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from db.repositories import ProjectsRepo
+from db.settings_store import AppSettings
+
+from .tenant_worker import TenantWorker
+
+logger = logging.getLogger(__name__)
+
+
+class MultiTenantRunner:
+    def __init__(self) -> None:
+        self._workers: dict[str, TenantWorker] = {}
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._stop_event = asyncio.Event()
+        # Tracks which non-Alpaca projects we've already warned about so we
+        # don't spam the log every 15s reconcile.
+        self._etrade_warned: dict[str, bool] = {}
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        for w in self._workers.values():
+            w.stop()
+
+    async def run_forever(self) -> None:
+        logger.info("multi-tenant runner started")
+        self._start_scheduler()
+        while not self._stop_event.is_set():
+            await self._reconcile()
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=15)
+            except asyncio.TimeoutError:
+                pass
+        for t in list(self._tasks.values()):
+            t.cancel()
+        try:
+            if getattr(self, "_scheduler", None):
+                self._scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        logger.info("multi-tenant runner stopped")
+
+    def _start_scheduler(self) -> None:
+        """Run notifications.send_daily_digest for every active project each
+        morning at the configured UTC hour. APScheduler is already in
+        requirements."""
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            from db.repositories import ProjectsRepo
+            from db.settings_store import AppSettings
+            from notifications.digest import send_daily_digest
+        except Exception as e:
+            logger.warning("scheduler not started: %s", e)
+            return
+
+        sched = AsyncIOScheduler()
+
+        async def _digest_tick():
+            if not bool(AppSettings.get("daily_digest_enabled", False)):
+                return
+            try:
+                for proj in ProjectsRepo.list_active():
+                    try:
+                        send_daily_digest(proj.project_id)
+                    except Exception as ex:
+                        logger.exception("digest failed for %s: %s",
+                                         proj.project_id, ex)
+            except Exception as ex:
+                logger.exception("digest tick error: %s", ex)
+
+        try:
+            hour = int(AppSettings.get("daily_digest_hour_utc", 13))
+        except Exception:
+            hour = 13
+        sched.add_job(_digest_tick, "cron", hour=hour, minute=0,
+                      id="daily_digest", replace_existing=True)
+
+        # ---- Nightly DB backup + prune --------------------------------
+        async def _backup_tick():
+            if not bool(AppSettings.get("backup_enabled", True)):
+                return
+            try:
+                from ops.backups import prune_old_backups, run_backup
+                await asyncio.to_thread(run_backup)
+                await asyncio.to_thread(prune_old_backups)
+            except Exception as ex:
+                logger.exception("backup tick error: %s", ex)
+        try:
+            backup_hour = int(AppSettings.get("backup_hour_utc", 7))
+        except Exception:
+            backup_hour = 7
+        sched.add_job(_backup_tick, "cron", hour=backup_hour, minute=0,
+                      id="daily_backup", replace_existing=True)
+
+        # ---- Position reconciliation ---------------------------------
+        async def _recon_tick():
+            from db.repositories import ProjectsRepo as _PR
+            try:
+                for proj in _PR.list_active():
+                    try:
+                        from ops.reconciliation import run_reconciliation
+                        await asyncio.to_thread(run_reconciliation,
+                                                proj.project_id)
+                    except Exception as ex:
+                        logger.exception("reconcile failed for %s: %s",
+                                         proj.project_id, ex)
+            except Exception as ex:
+                logger.exception("recon tick error: %s", ex)
+        try:
+            recon_min = int(AppSettings.get("reconcile_interval_min", 15) or 15)
+        except Exception:
+            recon_min = 15
+        if recon_min > 0:
+            sched.add_job(_recon_tick, "interval", minutes=recon_min,
+                          id="reconciliation", replace_existing=True)
+
+        # ---- Orders status polling ----------------------------------
+        async def _orders_tick():
+            from db.repositories import ProjectsRepo as _PR
+            try:
+                for proj in _PR.list_active():
+                    try:
+                        from ops.orders_tracker import poll_orders
+                        await asyncio.to_thread(poll_orders, proj.project_id)
+                    except Exception as ex:
+                        logger.exception("order poll failed %s: %s",
+                                         proj.project_id, ex)
+            except Exception as ex:
+                logger.exception("orders tick error: %s", ex)
+        try:
+            order_sec = int(AppSettings.get("order_poll_interval_sec", 30) or 30)
+        except Exception:
+            order_sec = 30
+        if order_sec > 0:
+            sched.add_job(_orders_tick, "interval", seconds=order_sec,
+                          id="orders_poll", replace_existing=True)
+
+        # ---- Anomaly detection (every 15 min) -----------------------
+        async def _anomaly_tick():
+            from db.repositories import ProjectsRepo as _PR
+            from intelligence.anomalies import detect_anomalies
+            try:
+                for proj in _PR.list_active():
+                    try:
+                        await asyncio.to_thread(detect_anomalies, proj.project_id)
+                    except Exception:
+                        logger.exception("anomaly detect failed %s",
+                                         proj.project_id)
+            except Exception:
+                logger.exception("anomaly tick error")
+        sched.add_job(_anomaly_tick, "interval", minutes=15,
+                      id="anomaly_detect", replace_existing=True)
+
+        # ---- AI recommendations (weekly Monday 14 UTC) --------------
+        async def _recs_tick():
+            from db.repositories import ProjectsRepo as _PR
+            from intelligence.recommendations import build_recommendations
+            try:
+                for proj in _PR.list_active():
+                    try:
+                        await asyncio.to_thread(build_recommendations,
+                                                proj.project_id)
+                    except Exception:
+                        logger.exception("recs build failed %s",
+                                         proj.project_id)
+            except Exception:
+                logger.exception("recs tick error")
+        sched.add_job(_recs_tick, "cron", day_of_week="mon", hour=14,
+                      minute=0, id="ai_recommendations",
+                      replace_existing=True)
+
+        sched.start()
+        self._scheduler = sched
+        logger.info("schedulers running: digest@%02dUTC backup@%02dUTC "
+                    "recon=%dm orders=%ds anomalies=15m recs=weekly",
+                    hour, backup_hour, recon_min, order_sec)
+
+    async def _reconcile(self) -> None:
+        try:
+            all_active = ProjectsRepo.list_active()
+        except Exception as e:
+            logger.exception("reconcile failed: %s", e)
+            return
+
+        # Phase-1 broker support: agents are still Alpaca-only. ETrade
+        # projects survive in the DB but skip the cycle loop until the
+        # full ETrade adapter ships in Phase 2.
+        alpaca_active: set[str] = set()
+        for p in all_active:
+            bt = (getattr(p, "broker_type", "alpaca") or "alpaca")
+            if bt == "alpaca":
+                alpaca_active.add(p.project_id)
+            else:
+                if not self._etrade_warned.get(p.project_id):
+                    logger.info(
+                        "skipping %s — broker_type=%s not yet supported by "
+                        "the runner (OAuth tokens present, agents pending)",
+                        p.project_id, bt,
+                    )
+                    self._etrade_warned[p.project_id] = True
+
+        max_concurrent = int(AppSettings.get("max_concurrent_tenants", 8))
+
+        # Stop workers that are no longer active (or switched to ETrade).
+        for pid in list(self._workers.keys()):
+            if pid not in alpaca_active:
+                self._workers[pid].stop()
+                task = self._tasks.pop(pid, None)
+                if task:
+                    task.cancel()
+                self._workers.pop(pid, None)
+
+        # Start workers for new active Alpaca projects, respecting concurrency.
+        for pid in alpaca_active:
+            if pid in self._workers:
+                continue
+            if len(self._workers) >= max_concurrent:
+                break
+            worker = TenantWorker(pid)
+            self._workers[pid] = worker
+            self._tasks[pid] = asyncio.create_task(worker.run_forever())

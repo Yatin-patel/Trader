@@ -1,0 +1,168 @@
+{% extends "_layout.html" %}
+{% block title %}Account · Autonomous Trader{% endblock %}
+{% block content %}
+
+<section class="panel">
+  <header class="panel-head">
+    <div>
+      <h1>Account</h1>
+      <span class="muted">{{ current_user.email }}</span>
+    </div>
+  </header>
+</section>
+
+<!-- Default brokerage for new projects -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Default Brokerage</h2>
+    <span class="muted">applied when creating new projects</span>
+  </header>
+  <form method="post" action="/account/default_broker"
+        style="padding: 18px 24px; display: flex; gap: 12px; align-items: flex-end;
+               max-width: 520px;">
+    <label class="auth-label" style="flex: 1;">
+      <span>Preferred brokerage</span>
+      <select name="default_broker">
+        <option value="alpaca" {% if default_broker == 'alpaca' %}selected{% endif %}>
+          Alpaca (simple API key + secret)
+        </option>
+        <option value="etrade" {% if default_broker == 'etrade' %}selected{% endif %}>
+          ETrade (OAuth 1.0a, daily token renewal)
+        </option>
+      </select>
+    </label>
+    <button type="submit" class="btn primary">Save</button>
+  </form>
+  <div class="muted" style="padding: 0 24px 18px; font-size: 12px;">
+    Each project can still pick its own broker when you create it.
+    This is just the default selected in the New Project dialog.
+  </div>
+</section>
+
+<!-- Change password -->
+<section class="panel">
+  <header class="panel-head"><h2>Change password</h2></header>
+  <form method="post" action="/account/change_password"
+        style="padding: 18px 24px; display: flex; flex-direction: column; gap: 14px; max-width: 420px;">
+    {% if pw_error %}
+    <div class="alert error"><div class="alert-detail">{{ pw_error }}</div></div>
+    {% endif %}
+    {% if pw_success %}
+    <div class="alert info"><div class="alert-detail">Password updated.</div></div>
+    {% endif %}
+    <label class="auth-label">
+      <span>Current password</span>
+      <input type="password" name="current_password" required autocomplete="current-password">
+    </label>
+    <label class="auth-label">
+      <span>New password</span>
+      <input type="password" name="new_password" required minlength="10" autocomplete="new-password">
+      <small>At least 10 characters.</small>
+    </label>
+    <label class="auth-label">
+      <span>Confirm new password</span>
+      <input type="password" name="new_password_confirm" required minlength="10" autocomplete="new-password">
+    </label>
+    <button type="submit" class="btn primary" style="align-self: flex-start;">Update password</button>
+  </form>
+</section>
+
+<!-- 2FA -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Two-Factor Authentication (TOTP)</h2>
+    <span class="badge {{ 'ok' if current_user.totp_enabled else 'ghost' }}">
+      {{ 'Enabled' if current_user.totp_enabled else 'Disabled' }}
+    </span>
+  </header>
+
+  <div style="padding: 18px 24px;">
+    {% if current_user.totp_enabled %}
+      <p class="muted">2FA is enabled. You'll be prompted for a 6-digit code on every sign-in.</p>
+      <form method="post" action="/account/2fa/disable" style="display: inline-block; margin-top: 8px;">
+        <button type="submit" class="btn danger">Disable 2FA</button>
+      </form>
+
+    {% elif provisioning_uri %}
+      <!-- Setup mode: secret is generated, waiting for verification -->
+      {% if totp_error %}<div class="alert error"><div class="alert-detail">{{ totp_error }}</div></div>{% endif %}
+      <p style="margin: 0 0 14px;">
+        1. Scan the QR code with Google Authenticator, 1Password, Authy, or any TOTP app.
+      </p>
+      <div style="display: flex; gap: 24px; align-items: center; flex-wrap: wrap;">
+        <img src="{{ qr_data_uri }}" alt="TOTP QR code"
+             style="background: white; padding: 8px; border-radius: 6px; border: 1px solid var(--border-soft);">
+        <div>
+          <div class="muted" style="font-size: 12px;">Or enter this key manually:</div>
+          <div style="font-family: var(--font-mono); font-size: 14px; padding: 8px 12px;
+                      background: var(--panel-soft); border-radius: 4px; margin-top: 4px;
+                      letter-spacing: 0.05em; user-select: all;">{{ totp_secret }}</div>
+        </div>
+      </div>
+
+      <form method="post" action="/account/2fa/verify"
+            style="margin-top: 22px; display: flex; gap: 10px; align-items: flex-end;">
+        <input type="hidden" name="secret" value="{{ totp_secret }}">
+        <label class="auth-label" style="margin: 0;">
+          <span>2. Enter the 6-digit code shown in your app</span>
+          <input type="text" name="code" required pattern="[0-9]{6}" maxlength="6"
+                 autocomplete="one-time-code" inputmode="numeric"
+                 placeholder="123456"
+                 style="width: 160px; letter-spacing: 0.2em; font-family: var(--font-mono);">
+        </label>
+        <button type="submit" class="btn primary">Verify &amp; enable</button>
+      </form>
+
+    {% else %}
+      <!-- Idle: offer to start setup -->
+      <p class="muted" style="margin: 0 0 14px;">
+        Add a one-time code to your sign-in. Requires an authenticator app
+        (Google Authenticator, Authy, 1Password, etc.).
+      </p>
+      <form method="post" action="/account/2fa/setup" style="display: inline-block;">
+        <button type="submit" class="btn primary">Enable 2FA</button>
+      </form>
+    {% endif %}
+  </div>
+</section>
+
+<!-- Sessions -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Active Sessions</h2>
+    <span class="muted">{{ active_sessions|length }} active</span>
+  </header>
+  <div style="padding: 8px 0;">
+    {% if active_sessions %}
+    <table class="data">
+      <thead>
+        <tr><th>Created</th><th>Expires</th><th>IP</th><th>Browser</th><th>This?</th></tr>
+      </thead>
+      <tbody>
+        {% for s in active_sessions %}
+        <tr>
+          <td>{{ s.created_at_str }}</td>
+          <td>{{ s.expires_at_str }}</td>
+          <td><code style="font-size: 11px;">{{ s.ip_address or '—' }}</code></td>
+          <td style="max-width: 320px; overflow: hidden; text-overflow: ellipsis;
+                     white-space: nowrap; font-size: 12px;">{{ s.user_agent or '—' }}</td>
+          <td>{% if s.is_current %}<span class="badge ok">current</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div style="padding: 18px 24px;" class="muted">No active sessions.</div>
+    {% endif %}
+  </div>
+  <div style="padding: 14px 24px; border-top: 1px solid var(--border-soft);">
+    <form method="post" action="/account/sessions/revoke_others" style="display: inline;">
+      <button type="submit" class="btn danger">Sign out everywhere else</button>
+    </form>
+    <span class="muted" style="margin-left: 12px; font-size: 12px;">
+      Keeps this tab logged in; kills every other session.
+    </span>
+  </div>
+</section>
+
+{% endblock %}

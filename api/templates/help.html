@@ -1,0 +1,527 @@
+{% extends "_layout.html" %}
+{% block title %}Help · Autonomous Trader{% endblock %}
+{% block content %}
+<section class="panel help-hero">
+  <header class="panel-head">
+    <div>
+      <h1>Help &amp; Feature Reference</h1>
+      <span class="muted">Organized by the page where you'll find each feature.</span>
+    </div>
+    <input type="text" id="help-search" placeholder="Search features…">
+  </header>
+</section>
+
+<!-- TOC -->
+<section class="panel">
+  <header class="panel-head"><h2>Jump to a page</h2></header>
+  <div class="help-toc">
+    <div class="toc-group">
+      <div class="toc-title">Foundation</div>
+      <ul>
+        <li><a href="#sec-auth">Sign in / Sign up</a></li>
+        <li><a href="#sec-brokers">Brokerages (Alpaca + ETrade)</a></li>
+        <li><a href="#sec-architecture">Core Architecture</a></li>
+        <li><a href="#sec-everywhere">Always-Available Features</a></li>
+      </ul>
+    </div>
+    <div class="toc-group">
+      <div class="toc-title">Project Pages</div>
+      <ul>
+        <li><a href="#sec-dashboard">Project Dashboard</a></li>
+        <li><a href="#sec-performance">Performance</a></li>
+        <li><a href="#sec-analysis">Analysis</a></li>
+        <li><a href="#sec-risk">Risk</a></li>
+        <li><a href="#sec-cycles">Wheel History</a></li>
+        <li><a href="#sec-reliability">Reliability</a></li>
+        <li><a href="#sec-intelligence">Intelligence</a></li>
+        <li><a href="#sec-outlook">Market Outlook</a></li>
+        <li><a href="#sec-backtest">Backtest</a></li>
+        <li><a href="#sec-notifications">Notifications</a></li>
+        <li><a href="#sec-logs">Logs</a></li>
+      </ul>
+    </div>
+    <div class="toc-group">
+      <div class="toc-title">Global Pages</div>
+      <ul>
+        <li><a href="#sec-portfolio">Portfolio (all projects)</a></li>
+        <li><a href="#sec-settings">Global Settings</a></li>
+        <li><a href="#sec-cost">LLM Cost</a></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     FOUNDATION
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-auth">
+  <header class="panel-head"><h2>Sign in / Sign up</h2><span class="muted">/login · /signup</span></header>
+  <div class="help-body">
+
+    <div class="help-feature">
+      <h3>Account creation</h3>
+      <p>Email + password (Argon2id hashed; OWASP-recommended parameters). Minimum 10 characters. The first user to sign up automatically becomes admin and inherits any pre-existing projects.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Sign in</h3>
+      <p>Session cookie is <strong>HttpOnly, SameSite=lax, session-only</strong> (no <code>Max-Age</code>) — the cookie is dropped when you close the browser, so you log out on every quit. Server-side sessions also expire after 14 days as an upper bound.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Single-window enforcement</h3>
+      <p>Opening this app in a second tab/window broadcasts a claim. The older tab receives it and auto-logs-out via a toast warning, preventing concurrent sessions from one browser.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Per-user project isolation</h3>
+      <p>Every project carries a <code>user_id</code>. Listing, viewing, editing, deleting — all scoped. Another user cannot see or open your projects (returns 404 to hide existence).</p>
+    </div>
+
+  </div>
+</section>
+
+<section class="panel help-section" id="sec-brokers">
+  <header class="panel-head"><h2>Brokerages</h2><span class="muted">per-project broker selection</span></header>
+  <div class="help-body">
+
+    <div class="help-feature">
+      <h3>Two supported brokers</h3>
+      <p>Every project chooses one broker at creation time. Existing projects use Alpaca; new projects can pick either:</p>
+      <ul>
+        <li><strong>Alpaca</strong> — fully wired. Simple API key + secret. Paper and live endpoints. <strong>Used by all four agents today.</strong></li>
+        <li><strong>ETrade</strong> — Phase 1 scaffolding shipped. OAuth 1.0a dance works, credentials persist encrypted. The runner currently <em>skips</em> ETrade projects (with a one-time log line) until the Phase 2 adapter is complete.</li>
+      </ul>
+    </div>
+
+    <div class="help-feature">
+      <h3>Adding an Alpaca project</h3>
+      <p>Dashboard → <strong>+ New Project</strong> → pick Alpaca → paste your API key + secret → choose paper or live endpoint. Keys are stored Fernet-encrypted in <code>trading_projects.alpaca_api_key</code> / <code>alpaca_secret_key</code>.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Adding an ETrade project</h3>
+      <p>Dashboard → <strong>+ New Project</strong> → pick ETrade. You'll provide the Consumer Key + Consumer Secret you got from <code>etrade.com/etx/ris/developer</code>. After saving, the UI redirects to <code>/etrade/connect</code>:</p>
+      <ul>
+        <li>Click <em>Open ETrade authorization page</em> — a new tab opens to ETrade.</li>
+        <li>Log in with your brokerage account → click Accept.</li>
+        <li>ETrade shows a 5-character verifier code on screen.</li>
+        <li>Paste it back into our form → access tokens are exchanged and stored encrypted.</li>
+      </ul>
+      <p>Daily token renewal is needed (ETrade tokens expire at midnight ET). Phase 2 will add a scheduled job.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Default broker (per user)</h3>
+      <p>Set in <code>/account → Default Brokerage</code>. Just changes which option is pre-selected in the New Project dialog. Doesn't affect existing projects.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>How agents stay broker-agnostic</h3>
+      <p>The <code>BrokerClient</code> ABC in <code>execution/base.py</code> defines a common interface. <code>execution.get_broker(project)</code> returns either <code>AlpacaClient</code> or <code>ETradeClient</code> based on the project's <code>broker_type</code> column. Phase 2 replaces direct <code>AlpacaClient(project)</code> calls with the factory everywhere.</p>
+    </div>
+
+  </div>
+</section>
+
+<section class="panel help-section" id="sec-architecture">
+  <header class="panel-head"><h2>Core Architecture</h2><span class="muted">how the bot thinks</span></header>
+  <div class="help-body">
+
+    <div class="help-feature">
+      <h3>Four-agent pipeline</h3>
+      <p>A LangGraph state machine cycles <strong>Scanner → Strategist → Guardrail → Executor</strong> per project on the configured loop interval. The Scanner pulls candidates, the Strategist (LLM) picks the contract, the Guardrail (deterministic) gates risk, and the Executor submits the order.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Multi-tenant runner</h3>
+      <p>One worker per active project. Market hours hard-gated — outside RTH the worker sleeps until <code>next_open</code>. Each tenant has isolated state, settings, and Alpaca keys (encrypted at rest with Fernet).</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Settings model</h3>
+      <p><code>app_settings</code> holds globals (LLM keys, backup dir). <code>project_settings</code> holds per-tenant strategy/risk params. Every setting is editable from the UI — nothing is hard-coded.</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- ========================================================================
+     GLOBAL / "EVERYWHERE" FEATURES
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-everywhere">
+  <header class="panel-head"><h2>Always-Available Features</h2><span class="muted">shared across every page</span></header>
+  <div class="help-body">
+
+    <div class="help-feature">
+      <h3>Project sub-nav (top of every project page)</h3>
+      <p>Sticky bar showing project name, market-open badge, runner status badge, and quick-links: Performance, Analysis, Risk, Wheel History, Reliability, Intelligence, Outlook, Backtest, Export CSV, Notifications, Logs, and the <strong>Optimize</strong> button. Updates every 5 s.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Optimize button</h3>
+      <p>Auto-tunes project settings based on your <em>current Alpaca cash balance</em> and a chosen strategy template. Tiny accounts ($&lt;5k) get 100% concentration + cheap-ticker watchlist; large accounts get diversified caps. Click to open dialog → auto-preview → Apply.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Floating AI chat</h3>
+      <p>Bottom-right 💬 button opens a context-aware chat. Uses your configured LLM (Anthropic or Gemini). Knows about the current project, can call tools (get positions, place trades). Voice input + speak-back optional.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Notification bell</h3>
+      <p>Top-nav badge with unread count. Lists recent in-app notifications: trades, kill-switch breaches, anomalies, daily digests. Click to mark all read.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Toast notifications</h3>
+      <p>Action results slide up from the bottom-center, auto-dismiss after 4.5 s, click to dismiss early. Four kinds: <span class="badge ok">ok</span> <span class="badge ghost">info</span> <span class="badge warn">warn</span> <span class="badge danger">error</span>. Replaces all native browser <code>alert()</code> dialogs.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Custom confirmations</h3>
+      <p>Destructive actions (delete, close position, etc.) open a styled in-app dialog instead of the browser's ugly <code>confirm()</code> popup.</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- ========================================================================
+     PROJECT DASHBOARD
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-dashboard">
+  <header class="panel-head"><h2>Project Dashboard</h2><span class="muted">/projects/{id}</span></header>
+  <div class="help-body">
+
+    <div class="help-feature">
+      <h3>Performance summary (top)</h3>
+      <p>Four cards at the top:</p>
+      <ul>
+        <li><strong>Starting Balance</strong> — equity at first portfolio snapshot.</li>
+        <li><strong>Current Equity</strong> — live from Alpaca.</li>
+        <li><strong>Short-Term Gain · 7d</strong> — $ and %, colored green/rose.</li>
+        <li><strong>Long-Term Gain · all-time</strong> — same.</li>
+      </ul>
+      <p>Refreshes every 30 s alongside the equity curve.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Account cards</h3>
+      <p>Live Cash, Buying Power, Equity, Portfolio Value — straight from Alpaca's account endpoint.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Pipeline visualization</h3>
+      <p>The 4-node graph (Scanner → Strategist → Guardrail → Executor) lights up as each step completes for the latest cycle. Errors turn the node rose.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Equity curve</h3>
+      <p>Pastel line chart of your equity over the last 30 days, drawn on a canvas from <code>portfolio_snapshots</code>. P10/P90 banding implicit in the y-axis range.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Cycles-per-minute chart</h3>
+      <p>30-minute bar chart of bot cycle activity. Quick sanity check — flat means the bot is idle.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Open positions + contracts</h3>
+      <p>Two side-by-side tables. Shows <em>all</em> Alpaca positions, not just DB-tracked ones (untracked rows get a <code>*</code> marker and a Close* button that uses Alpaca's market-close endpoint directly). Tracked rows use the standard Close.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Recent activity timeline</h3>
+      <p>Auto-updating list of agent events with plain-English narratives — every scan, decision, risk gate, execution, take-profit, and closure.</p>
+    </div>
+
+    <div class="help-feature">
+      <h3>Project Strategy &amp; Risk Settings</h3>
+      <p>Collapsed panel exposing every <code>project_setting</code> (~35 keys): delta bands, DTE bands, watchlist, concentration caps, take-profit %, dry-run flag, etc. Save each row inline.</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- ========================================================================
+     PERFORMANCE
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-performance">
+  <header class="panel-head"><h2>Performance</h2><span class="muted">/projects/{id}/performance</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Period metrics</h3>
+      <p>Trade count, win rate, total/avg P&amp;L, best/worst, max drawdown — for any window (today, week, month, YTD, all-time).</p>
+    </div>
+    <div class="help-feature">
+      <h3>Equity curve (larger)</h3>
+      <p>Same data as the dashboard mini-chart, but full-width with axis labels. Toggle period.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Closed trades table</h3>
+      <p>Every closed CSP/CC with entry/exit dates, days held, premium collected vs close cost, realized P&amp;L, closure reason. Sortable.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     ANALYSIS
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-analysis">
+  <header class="panel-head"><h2>Analysis</h2><span class="muted">/projects/{id}/analysis</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Strategy Attribution</h3>
+      <p>Slices realized P&amp;L by dimension: <strong>delta band</strong> (0.15-0.20, etc.), <strong>DTE bucket</strong> (0-3, 4-7, 8-14, …), <strong>phase</strong> (CSP/CC), <strong>ticker</strong>, <strong>day of week</strong>, <strong>underlying price range</strong>. Horizontal bars show total $, with confidence labels (low/med/high) based on trade count.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Per-ticker heatmap</h3>
+      <p>One row per ticker you've traded with win rate, trade count, total P&amp;L. Colored by P&amp;L magnitude.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     RISK
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-risk">
+  <header class="panel-head"><h2>Risk</h2><span class="muted">/projects/{id}/risk</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Kill switches</h3>
+      <p>Configurable hard stops: <strong>daily loss</strong> ($X or %), <strong>weekly loss</strong>, <strong>portfolio drawdown</strong>, <strong>max open contracts</strong>. When breached, the runner halts the project until you clear the kill.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Greeks aggregation</h3>
+      <p>Total delta, gamma, theta, vega across all open option contracts. Refreshed on demand (greeks calls are expensive).</p>
+    </div>
+    <div class="help-feature">
+      <h3>Concentration limits</h3>
+      <p>Max % of buying power any single ticker may consume (<code>max_concentration_per_ticker</code>). Guardrail rejects trades that would exceed it.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Earnings calendar lookup</h3>
+      <p>Type a ticker → see next earnings date from yfinance. The scanner blocks tickers with earnings within <code>avoid_earnings_within_dte</code> days.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     WHEEL HISTORY
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-cycles">
+  <header class="panel-head"><h2>Wheel History</h2><span class="muted">/projects/{id}/cycles</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Cycle tracker</h3>
+      <p>Every wheel cycle from the first CSP sale → (optional) assignment → CC sales → close. Tracks accumulated premium, adjusted cost basis (entry strike − total premium), realized P&amp;L per cycle.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Adjusted cost basis</h3>
+      <p>The CC strike selector uses (<em>entry strike − accumulated premium</em>) as the minimum legal strike, ensuring you don't sell calls below your effective cost. Prevents premature unwind at a loss.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     RELIABILITY
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-reliability">
+  <header class="panel-head"><h2>Reliability</h2><span class="muted">/projects/{id}/reliability</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Position reconciliation</h3>
+      <p>Periodic job compares DB-tracked positions to live Alpaca state. Mismatches logged to <code>reconciliation_log</code>; auto-sync optional. Manual trigger available.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Automated DB backups</h3>
+      <p>Daily SQL Server full backup to <code>backup_dir</code> at <code>backup_hour_utc</code>. Old .bak files pruned per <code>backup_retention_days</code>. Run-now and prune-now buttons.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Order lifecycle tracker</h3>
+      <p>Every submitted order recorded in <code>orders</code> table with Alpaca order_id, status, fills, errors. Poll-button to refresh from Alpaca.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Prometheus metrics</h3>
+      <p><code>/metrics</code> exposes cycle counts, error counts, latencies in standard Prometheus text format.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     INTELLIGENCE
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-intelligence">
+  <header class="panel-head"><h2>Intelligence</h2><span class="muted">/projects/{id}/intelligence</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>AI recommendations</h3>
+      <p>Ask Gemini/Claude for parameter tuning advice based on your last 30 days of attribution. Returns 1-2 specific changes with rationale. Click <strong>Apply</strong> to commit. Scales validated against the project's tunable schema (no out-of-range values).</p>
+    </div>
+    <div class="help-feature">
+      <h3>Anomaly detection</h3>
+      <p>Statistical detector runs every 15 min. Flags spikes (last hour ≥ 3× baseline), droughts (silent agent that was busy), and error storms (≥ 10 errors in last hour). Severity-tagged anomalies push to your notification channels.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Strategy templates</h3>
+      <p>Three curated presets — <strong>Conservative Wheel</strong>, <strong>Aggressive Income</strong>, <strong>IV-Disciplined</strong> — each defining ~20 settings. Apply with one click; settings go into <code>project_settings</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     OUTLOOK
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-outlook">
+  <header class="panel-head"><h2>Market Outlook</h2><span class="muted">/projects/{id}/outlook</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Top performers ranking</h3>
+      <p>Union of (S&amp;P top-50, your watchlist, traded tickers — capped at 120). Each ranked by composite score: <strong>P&amp;L (20%) + win rate (15%) + 1M/3M/6M momentum (40%) + IV rank (25%)</strong>. Click any row to see its 30/60/90-day outlook. Bars parallelized — ~5s for 100 tickers.</p>
+    </div>
+    <div class="help-feature">
+      <h3>30 / 60 / 90-day prediction (hybrid)</h3>
+      <p>Per-ticker forecast that combines:</p>
+      <ul>
+        <li><strong>Quantitative</strong> — lognormal projection fit to trailing year of daily log-returns. Shows P10 / median / P90 price bands, expected return %, prob(spot &gt; now), annualized σ.</li>
+        <li><strong>LLM narrative</strong> — Gemini writes one paragraph per horizon, grounded in the quant numbers + IV rank + wheel history + momentum. Returns direction (bullish/neutral/bearish) + confidence (low/med/high).</li>
+      </ul>
+      <p>Cached 12 hours per (ticker, horizon).</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     BACKTEST
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-backtest">
+  <header class="panel-head"><h2>Backtest</h2><span class="muted">/projects/{id}/backtest</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Run a backtest</h3>
+      <p>Pick a ticker universe + a date range + starting capital. Simulator walks daily bars, simulates CSP/CC selection using the project's current strategy params, and reports final equity, total P&amp;L, max drawdown, # of trades, win rate. Saves to <code>backtest_runs</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     NOTIFICATIONS
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-notifications">
+  <header class="panel-head"><h2>Notifications</h2><span class="muted">/projects/{id}/notifications</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Multi-channel alerts</h3>
+      <p>Add channels: <strong>Discord webhook</strong>, <strong>Slack webhook</strong>, <strong>SMTP email</strong>, <strong>generic webhook</strong>. Each has a kind-filter (e.g. only trades, only errors). Test-send button verifies setup.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Daily digest</h3>
+      <p>Once-a-day summary dispatched to all enabled channels: P&amp;L, trade count, open positions, biggest mover. Configurable hour (UTC).</p>
+    </div>
+    <div class="help-feature">
+      <h3>In-app history</h3>
+      <p>Every dispatched notification stored. Mark-all-read button. The top-nav bell shows unread count live.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     LOGS
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-logs">
+  <header class="panel-head"><h2>Logs</h2><span class="muted">/projects/{id}/logs</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Plain-English event log</h3>
+      <p>Every agent action narrated. Filter by node (Scanner / Strategist / Guardrail / Executor / TakeProfit / …), event type, or free-text search. Expand any row to see the raw JSON payload + narrative.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Trade journal CSV export</h3>
+      <p>Top-nav "Export CSV" link downloads every closed contract + closed equity position as a single CSV. Useful for tax prep and external analysis.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     PORTFOLIO
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-portfolio">
+  <header class="panel-head"><h2>Portfolio (cross-project)</h2><span class="muted">/portfolio</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Aggregated view</h3>
+      <p>One table across every project <em>you</em> own: equity, unrealized P&amp;L, monthly realized, trade count, win rate, totals row. Each ticker's per-project performance summed up.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     GLOBAL SETTINGS
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-settings">
+  <header class="panel-head"><h2>Global Settings</h2><span class="muted">/settings</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>LLM configuration</h3>
+      <p>Choose provider (Anthropic or Google), set API keys, pick models (strategist vs chat can differ — keep a cheap one for cycles, a smarter one for chat).</p>
+    </div>
+    <div class="help-feature">
+      <h3>Backup configuration</h3>
+      <p><code>backup_dir</code>, <code>backup_hour_utc</code>, <code>backup_retention_days</code>.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Default loop interval, scheduler controls</h3>
+      <p>Global defaults that individual projects can override via <code>loop_interval_seconds</code> in their project_settings.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================================
+     COST
+     ======================================================================== -->
+
+<section class="panel help-section" id="sec-cost">
+  <header class="panel-head"><h2>LLM Cost</h2><span class="muted">/cost</span></header>
+  <div class="help-body">
+    <div class="help-feature">
+      <h3>Token + cost tracking</h3>
+      <p>Every LLM call recorded with provider, model, input/output tokens, USD cost. Rolled up by day. Spot expensive cycles quickly.</p>
+    </div>
+    <div class="help-feature">
+      <h3>Response cache + rate limiting</h3>
+      <p>LRU cache (SHA-256 keyed, 5 min TTL, 512 entries) and sliding-window rate limiter prevent runaway spend. Cache stats endpoint shows hit ratio.</p>
+    </div>
+  </div>
+</section>
+
+<!-- Search filter script -->
+<script>
+(function () {
+  const input = document.getElementById("help-search");
+  if (!input) return;
+  const sections = Array.from(document.querySelectorAll(".help-section"));
+  input.addEventListener("input", () => {
+    const q = input.value.toLowerCase().trim();
+    sections.forEach(sec => {
+      const matches = !q || sec.textContent.toLowerCase().includes(q);
+      sec.style.display = matches ? "" : "none";
+    });
+  });
+})();
+</script>
+{% endblock %}

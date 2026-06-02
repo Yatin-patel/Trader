@@ -1,0 +1,39 @@
+{% extends "_layout.html" %}
+{% block title %}Global Settings{% endblock %}
+{% block content %}
+<section class="panel">
+  <header class="panel-head">
+    <h1>Global Settings</h1>
+    <p class="muted">Every operational parameter lives in the database. Edit here — changes apply on the next cycle.</p>
+  </header>
+
+  <form id="settings-form" class="settings-form">
+    {% set ns = namespace(prev=None) %}
+    {% for s in settings %}
+      {% if s.category != ns.prev %}
+        <h2 class="section-title">{{ s.category.title() }}</h2>
+        {% set ns.prev = s.category %}
+      {% endif %}
+      <div class="setting-row" data-key="{{ s.key }}" data-type="{{ s.value_type }}" data-secret="{{ 1 if s.is_secret else 0 }}">
+        <div class="setting-meta">
+          <code>{{ s.key }}</code>
+          {% if s.description %}<span class="muted">{{ s.description }}</span>{% endif %}
+        </div>
+        <div class="setting-value">
+          {% if s.value_type == 'bool' %}
+            <select data-value>
+              <option value="true" {% if s.value %}selected{% endif %}>true</option>
+              <option value="false" {% if not s.value %}selected{% endif %}>false</option>
+            </select>
+          {% elif s.is_secret %}
+            <input type="password" data-value placeholder="{{ '••••••' if s.value else 'unset' }}">
+          {% else %}
+            <input type="text" data-value value="{{ '' if s.value is none else s.value }}">
+          {% endif %}
+          <button class="btn small primary" data-action="save">Save</button>
+        </div>
+      </div>
+    {% endfor %}
+  </form>
+</section>
+{% endblock %}

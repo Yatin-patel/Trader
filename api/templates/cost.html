@@ -1,0 +1,36 @@
+{% extends "_layout.html" %}
+{% block title %}LLM Cost & Usage{% endblock %}
+{% block content %}
+<section class="panel" id="cost-root">
+  <header class="panel-head">
+    <h1>LLM Cost & Usage</h1>
+    <button class="btn small ghost" id="cost-refresh">Refresh</button>
+  </header>
+</section>
+
+<section class="cards">
+  <div class="card"><div class="card-label">Calls Today</div><div class="card-value" id="c-calls">—</div></div>
+  <div class="card"><div class="card-label">Tokens Today</div><div class="card-value" id="c-tokens">—</div></div>
+  <div class="card"><div class="card-label">Cost Today</div><div class="card-value" id="c-cost">—</div></div>
+  <div class="card"><div class="card-label">Cache Hit Rate</div><div class="card-value" id="c-hit">—</div></div>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>By Model (last 30 days)</h2></header>
+  <table class="data" id="model-table">
+    <thead><tr><th>Model</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr></thead>
+    <tbody><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>Recent Calls</h2></header>
+  <table class="data" id="usage-table">
+    <thead><tr><th>When</th><th>Purpose</th><th>Model</th>
+      <th>In</th><th>Out</th><th>Total</th><th>Cost</th><th>Cache?</th></tr></thead>
+    <tbody><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+  </table>
+</section>
+
+<script src="/static/cost.js"></script>
+{% endblock %}

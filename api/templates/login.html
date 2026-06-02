@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in · Autonomous Trader</title>
+  <link rel="stylesheet" href="/static/app.css?v=10">
+</head>
+<body class="auth-body">
+
+  <main class="auth-shell">
+    <aside class="auth-hero">
+      <div class="auth-hero-mark">⚡</div>
+      <div class="auth-hero-title">Autonomous Trader</div>
+      <div class="auth-hero-tag">Multi-tenant wheel-strategy automation, with a quiet conscience.</div>
+      <ul class="auth-hero-points">
+        <li>Scanner · Strategist · Guardrail · Executor — four agents, one loop.</li>
+        <li>Per-user project isolation. Encrypted Alpaca keys.</li>
+        <li>30 / 60 / 90-day outlooks, anomaly detection, AI parameter tuning.</li>
+      </ul>
+    </aside>
+
+    <section class="auth-panel">
+      <header class="auth-panel-head">
+        <h1>Welcome back</h1>
+        <p class="muted">Sign in to your projects.</p>
+      </header>
+      <form method="post" action="/login" class="auth-form">
+        {% if error %}
+        <div class="alert error">
+          <div class="alert-detail">{{ error }}</div>
+        </div>
+        {% endif %}
+        <label class="auth-label">
+          <span>Email</span>
+          <input type="email" name="email" required autofocus
+                 value="{{ email or '' }}" autocomplete="username">
+        </label>
+        <label class="auth-label">
+          <span>Password</span>
+          <input type="password" name="password" required
+                 autocomplete="current-password">
+        </label>
+        <button type="submit" class="btn primary auth-submit">Sign in</button>
+        <div class="auth-foot">
+          New here? <a href="/signup">Create an account</a>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <script src="/static/toast.js?v=2"></script>
+</body>
+</html>

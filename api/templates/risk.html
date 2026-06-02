@@ -1,0 +1,106 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }} · Risk{% endblock %}
+{% block content %}
+<section class="panel" data-project-id="{{ project.project_id }}" id="risk-root">
+  <header class="panel-head">
+    <div>
+      <h1>Risk Management</h1>
+      <span class="muted">
+        <a href="/projects/{{ project.project_id }}">← back to dashboard</a>
+        &nbsp;·&nbsp; {{ project.project_name }}
+      </span>
+    </div>
+    <div class="status-bar">
+      <button class="btn small ghost" id="risk-refresh">Refresh</button>
+      <button class="btn small primary" id="evaluate-now">Evaluate now</button>
+    </div>
+  </header>
+</section>
+
+<div id="breach-banner"></div>
+
+<!-- Portfolio Greeks -->
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Portfolio Delta (Δ)</div>
+    <div class="card-value" id="greek-delta">—</div>
+    <div class="card-sub muted">long-equity exposure</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Theta (Θ) per day</div>
+    <div class="card-value" id="greek-theta">—</div>
+    <div class="card-sub muted">time-decay income</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Vega (V)</div>
+    <div class="card-value" id="greek-vega">—</div>
+    <div class="card-sub muted">vol sensitivity</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Gamma (Γ)</div>
+    <div class="card-value" id="greek-gamma">—</div>
+    <div class="card-sub muted">delta acceleration</div>
+  </div>
+</section>
+
+<!-- Kill switches -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Kill Switches</h2>
+    <button class="btn small primary" id="add-limit">+ Add limit</button>
+  </header>
+  <table class="data" id="limits-table">
+    <thead>
+      <tr><th>Type</th><th>Threshold</th><th>Window</th><th>Action</th>
+          <th>Enabled</th><th>Breaches</th><th>Last breach</th><th></th></tr>
+    </thead>
+    <tbody><tr><td colspan="8" class="empty">No kill switches configured yet.</td></tr></tbody>
+  </table>
+</section>
+
+<!-- Add/edit dialog -->
+<dialog id="limit-dialog">
+  <form id="limit-form" method="dialog">
+    <h2 id="limit-form-title">New Kill Switch</h2>
+    <input type="hidden" name="limit_id" value="">
+    <label>Type
+      <select name="limit_type" required>
+        <option value="daily_loss">Daily loss limit ($)</option>
+        <option value="drawdown_pct">Drawdown % from peak (0..1)</option>
+        <option value="consecutive_losses">Consecutive losing trades</option>
+        <option value="error_storm">Error storm (errors in window)</option>
+      </select>
+    </label>
+    <label>Threshold <input type="number" name="threshold" step="0.0001" required></label>
+    <label>Window (minutes — error_storm only) <input type="number" name="window_minutes" min="1"></label>
+    <label>Action
+      <select name="action">
+        <option value="HALT">HALT (stop trading)</option>
+        <option value="LIQUIDATE">LIQUIDATE (close all + halt)</option>
+      </select>
+    </label>
+    <label class="checkbox"><input type="checkbox" name="enabled" checked> Enabled</label>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Earnings calendar lookup -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Earnings Lookup</h2>
+  </header>
+  <div style="padding: 16px 20px;">
+    <label class="muted" style="font-size: 13px;">
+      Ticker
+      <input type="text" id="earn-ticker" placeholder="NVDA" style="text-transform: uppercase; width: 100px;">
+    </label>
+    <button class="btn small primary" id="earn-fetch">Check</button>
+    <span id="earn-result" class="muted" style="margin-left: 16px;"></span>
+  </div>
+</section>
+
+<script src="/static/risk.js"></script>
+{% endblock %}

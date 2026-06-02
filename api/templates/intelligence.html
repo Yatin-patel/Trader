@@ -1,0 +1,40 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }} · Intelligence{% endblock %}
+{% block content %}
+<section class="panel" data-project-id="{{ project.project_id }}" id="intel-root">
+  <header class="panel-head">
+    <div>
+      <h1>Intelligence</h1>
+      <span class="muted">
+        <a href="/projects/{{ project.project_id }}">← back to dashboard</a>
+        &nbsp;·&nbsp; {{ project.project_name }}
+      </span>
+    </div>
+    <div class="status-bar">
+      <button class="btn small ghost" id="anom-detect">Detect anomalies</button>
+      <button class="btn small primary" id="rec-build">Get AI suggestions</button>
+    </div>
+  </header>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>AI Recommendations</h2></header>
+  <div id="rec-list" style="padding: 16px 20px;">Loading…</div>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>Anomalies (recent)</h2></header>
+  <table class="data" id="anom-table">
+    <thead><tr><th>Detected</th><th>Severity</th><th>Kind</th>
+      <th>Baseline</th><th>Observed</th></tr></thead>
+    <tbody><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>Strategy Templates</h2></header>
+  <div id="tpl-list" style="padding: 16px 20px;">Loading…</div>
+</section>
+
+<script src="/static/intelligence.js?v=2"></script>
+{% endblock %}

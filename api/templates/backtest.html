@@ -1,0 +1,52 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }} · Backtest{% endblock %}
+{% block content %}
+<section class="panel" data-project-id="{{ project.project_id }}" id="bt-root">
+  <header class="panel-head">
+    <div>
+      <h1>Backtest</h1>
+      <span class="muted">
+        <a href="/projects/{{ project.project_id }}">← back to dashboard</a>
+        &nbsp;·&nbsp; {{ project.project_name }}
+      </span>
+    </div>
+  </header>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>Run a backtest</h2></header>
+  <form id="bt-form" class="settings-form" style="padding: 16px 20px;">
+    <label>Run name <input type="text" name="name" value="ad-hoc"></label>
+    <label>From date <input type="date" name="from_date" required></label>
+    <label>To date <input type="date" name="to_date" required></label>
+    <label>Universe (comma-separated, blank = project watchlist)
+      <input type="text" name="universe" placeholder="NVDA, AMD, SOFI">
+    </label>
+    <div style="padding-top: 8px;">
+      <button class="btn primary" type="submit" id="bt-run">Run backtest</button>
+      <span class="muted" id="bt-status" style="margin-left: 12px;"></span>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2>Run history</h2></header>
+  <table class="data" id="bt-runs">
+    <thead>
+      <tr><th>Run</th><th>Name</th><th>From</th><th>To</th>
+          <th>Status</th><th>P/L</th><th>Trades</th><th></th></tr>
+    </thead>
+    <tbody><tr><td colspan="8" class="empty">No runs yet.</td></tr></tbody>
+  </table>
+</section>
+
+<section class="panel" id="bt-detail-panel" hidden>
+  <header class="panel-head">
+    <h2 id="bt-detail-title">Run detail</h2>
+    <button class="btn small ghost" id="bt-detail-close">Close</button>
+  </header>
+  <div id="bt-detail" style="padding: 16px 20px;"></div>
+</section>
+
+<script src="/static/backtest.js"></script>
+{% endblock %}

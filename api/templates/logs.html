@@ -1,0 +1,78 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }} · Logs{% endblock %}
+{% block content %}
+<section class="panel" data-project-id="{{ project.project_id }}" id="logs-root">
+  <header class="panel-head">
+    <div>
+      <h1>Activity Logs</h1>
+      <span class="muted">
+        <a href="/projects/{{ project.project_id }}">← back to dashboard</a>
+        &nbsp;·&nbsp; {{ project.project_name }} ({{ project.project_id }})
+      </span>
+    </div>
+    <div class="status-bar">
+      <span class="badge ghost" id="logs-count">—</span>
+      <label class="muted" style="font-size:12px;">
+        <input type="checkbox" id="logs-auto" checked> auto-refresh
+      </label>
+    </div>
+  </header>
+</section>
+
+<section class="panel">
+  <div class="logs-filters">
+    <label>
+      <span class="muted">Node</span>
+      <select id="f-node">
+        <option value="">All</option>
+        <option>Scanner</option>
+        <option>Strategist</option>
+        <option>Guardrail</option>
+        <option>Executor</option>
+        <option>Worker</option>
+        <option>Admin</option>
+      </select>
+    </label>
+    <label>
+      <span class="muted">Event type</span>
+      <select id="f-type">
+        <option value="">All</option>
+        <option>SCAN</option>
+        <option>DECIDE</option>
+        <option>SELECTION</option>
+        <option>RISK</option>
+        <option>EXECUTE</option>
+        <option>LOOP</option>
+        <option>ERROR</option>
+        <option>RESET_PAPER</option>
+      </select>
+    </label>
+    <label>
+      <span class="muted">Search text</span>
+      <input type="text" id="f-search" placeholder="NVDA, rejected, stop-loss…">
+    </label>
+    <label>
+      <span class="muted">Show</span>
+      <select id="f-limit">
+        <option value="50">50</option>
+        <option value="100" selected>100</option>
+        <option value="250">250</option>
+        <option value="500">500</option>
+      </select>
+    </label>
+    <button class="btn primary small" id="f-refresh">Refresh</button>
+    <button class="btn ghost small" id="f-clear">Clear filters</button>
+  </div>
+</section>
+
+<section class="panel">
+  <ul class="logs-list" id="logs-list">
+    <li class="logs-empty">Loading…</li>
+  </ul>
+  <div class="logs-more">
+    <button class="btn ghost small" id="logs-load-more">Load older →</button>
+  </div>
+</section>
+
+<script src="/static/logs.js"></script>
+{% endblock %}

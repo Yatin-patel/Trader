@@ -1,0 +1,39 @@
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: trader-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Trader_Strong!1}"
+      MSSQL_PID: "Express"
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  trader:
+    build: .
+    container_name: trader-app
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      DB_DRIVER: "ODBC Driver 18 for SQL Server"
+      DB_SERVER: "sqlserver,1433"
+      DB_NAME: "TraderDB"
+      DB_TRUSTED_CONNECTION: "no"
+      DB_USER: "sa"
+      DB_PASSWORD: "${MSSQL_SA_PASSWORD:-Trader_Strong!1}"
+      SECRET_ENCRYPTION_KEY: "${SECRET_ENCRYPTION_KEY:-}"
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+    ports:
+      - "8000:8000"
+
+volumes:
+  sqlserver_data:

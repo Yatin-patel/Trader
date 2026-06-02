@@ -1,0 +1,139 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }}{% endblock %}
+{% block content %}
+<div id="project-root" data-project-id="{{ project.project_id }}" hidden></div>
+
+<!-- Warnings -->
+<div id="warnings"></div>
+
+<!-- Performance summary (top) -->
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Starting Balance</div>
+    <div class="card-value" id="card-starting">—</div>
+    <div class="card-sub muted" id="card-starting-sub">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Current Equity</div>
+    <div class="card-value" id="card-current">—</div>
+    <div class="card-sub muted" id="card-current-sub">—</div>
+    <canvas class="card-sparkline" id="spark-current" width="200" height="32" aria-hidden="true"></canvas>
+  </div>
+  <div class="card">
+    <div class="card-label">Short-Term Gain · 7d</div>
+    <div class="card-value" id="card-st-gain">—</div>
+    <div class="card-sub" id="card-st-pct">—</div>
+    <canvas class="card-sparkline" id="spark-st" width="200" height="32" aria-hidden="true"></canvas>
+  </div>
+  <div class="card">
+    <div class="card-label">Long-Term Gain · all-time</div>
+    <div class="card-value" id="card-lt-gain">—</div>
+    <div class="card-sub" id="card-lt-pct">—</div>
+    <canvas class="card-sparkline" id="spark-lt" width="200" height="32" aria-hidden="true"></canvas>
+  </div>
+</section>
+
+<!-- Account cards -->
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Cash</div>
+    <div class="card-value" id="card-cash">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Buying Power</div>
+    <div class="card-value" id="card-bp">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Equity</div>
+    <div class="card-value" id="card-equity">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Portfolio Value</div>
+    <div class="card-value" id="card-pv">—</div>
+  </div>
+</section>
+
+<!-- Pipeline -->
+<section class="panel">
+  <header class="panel-head"><h2>Latest Cycle Pipeline</h2></header>
+  <div class="pipeline" id="pipeline"></div>
+</section>
+
+<!-- Equity curve (Cat 9.1) -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Equity Curve</h2>
+    <span class="muted" id="equity-summary"></span>
+  </header>
+  <canvas id="dash-equity-curve" height="160"></canvas>
+</section>
+
+<!-- Activity chart -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Cycles per Minute · last 30 min</h2>
+    <span class="muted" id="chart-total"></span>
+  </header>
+  <div class="chart" id="cycles-chart"></div>
+</section>
+
+<div class="grid-2">
+  <!-- Positions -->
+  <section class="panel">
+    <header class="panel-head"><h2>Open Stock Positions</h2></header>
+    <table class="data" id="positions-table">
+      <thead><tr><th>Ticker</th><th>Qty</th><th>Entry</th><th>Current</th><th>P/L</th><th></th></tr></thead>
+      <tbody><tr><td colspan="6" class="empty">No open positions</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- Contracts -->
+  <section class="panel">
+    <header class="panel-head"><h2>Open Option Contracts</h2></header>
+    <table class="data" id="contracts-table">
+      <thead><tr><th>Ticker</th><th>Phase</th><th>Strike</th><th>Premium</th><th>Expiration</th><th></th></tr></thead>
+      <tbody><tr><td colspan="6" class="empty">No open contracts</td></tr></tbody>
+    </table>
+  </section>
+</div>
+
+<!-- Timeline -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Recent Activity</h2>
+    <span class="muted">auto-updates every 5s</span>
+  </header>
+  <ul class="timeline" id="timeline"></ul>
+</section>
+
+<!-- Project settings (collapsed) -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>Project Strategy &amp; Risk Settings</h2>
+    <button class="btn ghost small" id="toggle-settings">Show</button>
+  </header>
+  <form class="settings-form" data-project-id="{{ project.project_id }}" id="project-settings-form" style="display:none;">
+    {% for s in project_settings %}
+    <div class="setting-row" data-key="{{ s.key }}" data-type="{{ s.value_type }}">
+      <div class="setting-meta">
+        <code>{{ s.key }}</code>
+        <span class="muted">{{ s.description }}</span>
+      </div>
+      <div class="setting-value">
+        {% if s.value_type == 'bool' %}
+          <select data-value>
+            <option value="true" {% if s.value %}selected{% endif %}>true</option>
+            <option value="false" {% if not s.value %}selected{% endif %}>false</option>
+          </select>
+        {% else %}
+          <input type="text" data-value value="{{ s.value }}">
+        {% endif %}
+        <button class="btn small primary" data-action="save-project">Save</button>
+      </div>
+    </div>
+    {% endfor %}
+  </form>
+</section>
+
+<script src="/static/project_dashboard.js?v=4"></script>
+{% endblock %}

@@ -1,0 +1,87 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }} · Reliability{% endblock %}
+{% block content %}
+<section class="panel" data-project-id="{{ project.project_id }}" id="rel-root">
+  <header class="panel-head">
+    <div>
+      <h1>Reliability</h1>
+      <span class="muted">
+        <a href="/projects/{{ project.project_id }}">← back to dashboard</a>
+        &nbsp;·&nbsp; {{ project.project_name }}
+      </span>
+    </div>
+    <div class="status-bar">
+      <button class="btn small ghost" id="rel-refresh">Refresh</button>
+    </div>
+  </header>
+</section>
+
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Open Orders</div>
+    <div class="card-value" id="m-open-orders">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Errors (60m)</div>
+    <div class="card-value" id="m-errors">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Events (5m)</div>
+    <div class="card-value" id="m-events">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Last Backup</div>
+    <div class="card-value" id="m-backup">—</div>
+  </div>
+</section>
+
+<section class="panel">
+  <header class="panel-head">
+    <h2>Orders</h2>
+    <button class="btn small primary" id="orders-poll">Poll now</button>
+  </header>
+  <table class="data" id="orders-table">
+    <thead>
+      <tr><th>Submitted</th><th>Symbol</th><th>Side</th><th>Type</th><th>Qty</th>
+          <th>Limit</th><th>Status</th><th>Filled</th><th>Avg</th><th>Polled</th></tr>
+    </thead>
+    <tbody><tr><td colspan="10" class="empty">No orders tracked yet.</td></tr></tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <header class="panel-head">
+    <h2>Reconciliation</h2>
+    <div>
+      <label class="muted" style="font-size:12px;">
+        <input type="checkbox" id="recon-auto"> Auto-sync (mark missing rows closed)
+      </label>
+      <button class="btn small primary" id="recon-run">Reconcile now</button>
+    </div>
+  </header>
+  <table class="data" id="recon-table">
+    <thead>
+      <tr><th>Ran At</th><th>Mismatches</th><th>Auto-sync</th><th></th></tr>
+    </thead>
+    <tbody><tr><td colspan="4" class="empty">No runs yet.</td></tr></tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <header class="panel-head">
+    <h2>DB Backups</h2>
+    <div>
+      <button class="btn small ghost" id="backup-prune">Prune old</button>
+      <button class="btn small primary" id="backup-run">Backup now</button>
+    </div>
+  </header>
+  <table class="data" id="backup-table">
+    <thead>
+      <tr><th>Started</th><th>Status</th><th>Path</th><th>Size</th><th>Error</th></tr>
+    </thead>
+    <tbody><tr><td colspan="5" class="empty">No backups yet.</td></tr></tbody>
+  </table>
+</section>
+
+<script src="/static/reliability.js"></script>
+{% endblock %}

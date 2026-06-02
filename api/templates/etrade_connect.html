@@ -1,0 +1,67 @@
+{% extends "_layout.html" %}
+{% block title %}Connect ETrade · {{ project.project_name }}{% endblock %}
+{% block content %}
+
+<section class="panel">
+  <header class="panel-head">
+    <div>
+      <h1>Connect ETrade</h1>
+      <span class="muted">{{ project.project_name }} ·
+        {{ project.etrade_environment }} environment</span>
+    </div>
+  </header>
+
+  <div style="padding: 24px; line-height: 1.6;">
+    <p>ETrade uses OAuth 1.0a out-of-band (OOB) authorization. There are two short steps:</p>
+
+    <div class="empty-tips" style="margin: 16px 0;">
+      <div class="empty-tip">
+        <strong>1. Authorize</strong>
+        <span>Click the button below. ETrade opens in a new tab. Sign in
+              with your brokerage account and click Accept.</span>
+      </div>
+      <div class="empty-tip">
+        <strong>2. Copy the 5-character verifier code</strong>
+        <span>ETrade will display the code on screen after you authorize.</span>
+      </div>
+      <div class="empty-tip">
+        <strong>3. Paste it below</strong>
+        <span>We exchange it for an access token, stored encrypted.</span>
+      </div>
+    </div>
+
+    <div style="display: flex; gap: 12px; align-items: center; margin: 28px 0;">
+      <a href="{{ authorize_url }}" target="_blank" rel="noopener"
+         class="btn primary">Open ETrade authorization page →</a>
+      <span class="muted" style="font-size: 12px;">opens in a new tab</span>
+    </div>
+
+    <form method="post" action="/etrade/callback"
+          style="display: flex; gap: 10px; align-items: flex-end; max-width: 520px;">
+      <input type="hidden" name="project_id" value="{{ project.project_id }}">
+      <label class="auth-label" style="flex: 1;">
+        <span>Verifier code from ETrade</span>
+        <input type="text" name="verifier" required
+               pattern="[A-Z0-9]{4,10}" maxlength="10"
+               placeholder="e.g. AB12C"
+               style="text-transform: uppercase; letter-spacing: 0.2em;
+                      font-family: var(--font-mono); font-size: 16px;">
+      </label>
+      <button type="submit" class="btn primary">Connect</button>
+    </form>
+
+    <div style="margin-top: 30px; padding: 14px 18px; background: var(--warn-soft);
+                border-radius: var(--radius-md); font-size: 13px; color: var(--warn-strong);">
+      <strong>Heads up:</strong> ETrade access tokens expire daily at
+      midnight US Eastern. The bot will need to re-authorize automatically
+      via the daily renewal job, or you'll re-run this flow if the token
+      becomes invalid.
+    </div>
+
+    <p style="margin-top: 24px;">
+      <a href="/projects/{{ project.project_id }}" class="muted">← Cancel and return to project</a>
+    </p>
+  </div>
+</section>
+
+{% endblock %}

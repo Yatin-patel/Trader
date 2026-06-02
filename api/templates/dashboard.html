@@ -1,0 +1,137 @@
+{% extends "_layout.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+
+{% if projects %}
+<section class="panel">
+  <header class="panel-head">
+    <h1>Trading Projects</h1>
+    <button id="add-project-btn" class="btn primary">+ New Project</button>
+  </header>
+
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Project ID</th>
+        <th>Name</th>
+        <th>Endpoint</th>
+        <th>Allocation</th>
+        <th>Active</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in projects %}
+      <tr>
+        <td><a href="/projects/{{ p.project_id }}">{{ p.project_id }}</a></td>
+        <td>{{ p.project_name }}</td>
+        <td><code>{{ p.alpaca_base_url }}</code></td>
+        <td>${{ "%.2f"|format(p.max_equity_allocation) }}</td>
+        <td>{{ "Yes" if p.is_active else "No" }}</td>
+        <td>
+          <a class="btn small ghost" href="/projects/{{ p.project_id }}/performance">P&amp;L</a>
+          <a class="btn small ghost" href="/projects/{{ p.project_id }}/analysis">Analysis</a>
+          <a class="btn small ghost" href="/projects/{{ p.project_id }}/risk">Risk</a>
+          <a class="btn small ghost" href="/projects/{{ p.project_id }}/cycles">Wheel</a>
+          <a class="btn small ghost" href="/projects/{{ p.project_id }}/reliability">Ops</a>
+          <a class="btn small ghost" href="/projects/{{ p.project_id }}/backtest">Backtest</a>
+          <a class="btn small ghost" href="/projects/{{ p.project_id }}/notifications">Notify</a>
+          <a class="btn small ghost" href="/projects/{{ p.project_id }}/logs">Logs</a>
+          <button class="btn small danger" data-action="delete" data-id="{{ p.project_id }}">Delete</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{% else %}
+<!-- Empty state: friendly welcome for new accounts -->
+<section class="panel empty-state-panel">
+  <div class="empty-state">
+    <svg class="empty-icon" viewBox="0 0 64 64" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="8" y="14" width="48" height="40" rx="4"/>
+      <path d="M20 26h24M20 34h24M20 42h14"/>
+      <circle cx="50" cy="14" r="6" fill="var(--accent)" stroke="none"/>
+      <path d="M48 14l2 2 4-4" stroke="white" stroke-width="2"/>
+    </svg>
+    <h2>Welcome, {{ current_user.email.split('@')[0] }}</h2>
+    <p>Create your first trading project to start the autonomous wheel.</p>
+    <p class="muted">Each project has its own Alpaca account, watchlist, and risk settings — fully isolated from everyone else's data.</p>
+    <button id="add-project-btn" class="btn primary empty-cta">+ Add your first project</button>
+    <div class="empty-tips">
+      <div class="empty-tip">
+        <strong>1. Get Alpaca paper keys</strong>
+        <span>app.alpaca.markets/paper → API Keys</span>
+      </div>
+      <div class="empty-tip">
+        <strong>2. Add a project</strong>
+        <span>Paste the keys, give it a name, set allocation</span>
+      </div>
+      <div class="empty-tip">
+        <strong>3. Click Optimize</strong>
+        <span>Auto-tunes settings to your cash + chosen strategy</span>
+      </div>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<dialog id="project-dialog">
+  <form id="project-form" method="dialog">
+    <h2>New Project</h2>
+
+    <label>Brokerage
+      <select name="broker_type" id="broker-type-select">
+        <option value="alpaca">Alpaca (paper + live, simple API key auth)</option>
+        <option value="etrade">ETrade (OAuth 1.0a, daily token renewal)</option>
+      </select>
+    </label>
+
+    <label>Project ID <input name="project_id" required pattern="[A-Za-z0-9_-]+"></label>
+    <label>Project Name <input name="project_name" required></label>
+
+    <!-- Alpaca-specific fields -->
+    <div data-broker-fields="alpaca">
+      <label>Alpaca API Key <input name="alpaca_api_key" data-broker-required="alpaca"></label>
+      <label>Alpaca Secret Key <input name="alpaca_secret_key" type="password" data-broker-required="alpaca"></label>
+      <label>Alpaca Base URL
+        <select name="alpaca_base_url">
+          <option value="https://paper-api.alpaca.markets">Paper (paper-api.alpaca.markets)</option>
+          <option value="https://api.alpaca.markets">Live (api.alpaca.markets)</option>
+        </select>
+      </label>
+      <label>Data Feed
+        <select name="alpaca_data_feed">
+          <option value="iex">iex</option>
+          <option value="sip">sip</option>
+        </select>
+      </label>
+    </div>
+
+    <!-- ETrade-specific fields -->
+    <div data-broker-fields="etrade" hidden>
+      <label>ETrade Consumer Key <input name="etrade_consumer_key" data-broker-required="etrade"></label>
+      <label>ETrade Consumer Secret <input name="etrade_consumer_secret" type="password" data-broker-required="etrade"></label>
+      <label>Environment
+        <select name="etrade_environment">
+          <option value="sandbox">Sandbox (apisb.etrade.com)</option>
+          <option value="production">Production (api.etrade.com)</option>
+        </select>
+      </label>
+      <p class="muted" style="font-size: 12px; margin: 4px 0 0;">
+        After saving, you'll be prompted to authorize via ETrade's OAuth
+        page to mint access tokens. Tokens expire daily at midnight ET.
+      </p>
+    </div>
+
+    <label>Max Equity Allocation ($) <input name="max_equity_allocation" type="number" step="0.01" required></label>
+    <label class="checkbox"><input type="checkbox" name="is_active" checked> Active</label>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}

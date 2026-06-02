@@ -1,0 +1,48 @@
+# Core
+python-dotenv==1.0.1
+pydantic==2.9.2
+pydantic-settings==2.6.1
+
+# Database - SQL Server Express
+pyodbc==5.2.0
+sqlalchemy==2.0.36
+
+# Trading - Alpaca
+alpaca-py==0.33.1
+
+# Agentic Framework
+langchain==0.3.7
+langchain-anthropic==0.2.4
+langchain-google-genai==2.0.4
+langgraph==0.2.50
+anthropic==0.39.0
+google-generativeai==0.8.3
+
+# API + UI
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+jinja2==3.1.4
+python-multipart==0.0.17
+
+# Async / scheduling
+apscheduler==3.10.4
+httpx==0.27.2
+tenacity==9.0.0
+
+# Logging
+structlog==24.4.0
+
+# Crypto (Fernet for at-rest Alpaca key encryption)
+cryptography==43.0.3
+
+# Auth (Phase 1: email/password login + sessions, Phase 3: TOTP 2FA)
+argon2-cffi==25.1.0
+itsdangerous==2.2.0
+pyotp==2.9.0
+qrcode==7.4.2
+
+# Brokerage: OAuth 1.0a for ETrade (Alpaca uses simple key+secret via alpaca-py)
+requests-oauthlib==2.0.0
+
+# Earnings calendar (Yahoo Finance scrape, no API key)
+yfinance==0.2.50
