@@ -55,6 +55,12 @@ def evaluate_auto_roll(project_id: str) -> list[dict[str, Any]]:
     band = effective_csp_band(project_id)
     cadence_active = band["cadence"] != "custom"
 
+    # 21-DTE rule (tasty-style): once DTE drops to this threshold, roll any
+    # OTM CSP regardless of profit, because gamma risk is no longer worth
+    # the dwindling theta. Set to 0 to disable.
+    twenty_one_dte = int(ProjectSettings.get(
+        project_id, "manage_at_dte", default=21) or 0)
+
     candidates: list[dict[str, Any]] = []
     for c in open_contracts:
         exp = c.get("expiration_date")
@@ -70,12 +76,23 @@ def evaluate_auto_roll(project_id: str) -> list[dict[str, Any]]:
             cadence_active
             and c.get("strategy_phase") == "CASH_SECURED_PUT"
             and (dte < band["min_dte"] or dte > band["max_dte"])
-            # Don't double-roll: skip if near_expiry already fires.
             and not near_expiry
         )
-        if not (near_expiry or cadence_drift):
+        # Trigger 3: 21-DTE management for CSPs. Don't trigger for CCs —
+        # CCs are managed by early-profit logic (separate rule below).
+        twenty_one = (
+            twenty_one_dte > 0
+            and c.get("strategy_phase") == "CASH_SECURED_PUT"
+            and dte <= twenty_one_dte
+            and dte > dte_threshold  # near_expiry has priority
+            and not cadence_drift    # cadence_drift has priority
+        )
+        if not (near_expiry or cadence_drift or twenty_one):
             continue
-        c["_roll_reason"] = "near_expiry" if near_expiry else "cadence_drift"
+        c["_roll_reason"] = (
+            "near_expiry" if near_expiry
+            else ("cadence_drift" if cadence_drift else "21_dte_management")
+        )
         candidates.append(c)
 
     if not candidates:
@@ -142,6 +159,12 @@ def evaluate_auto_roll(project_id: str) -> list[dict[str, Any]]:
             why = (
                 f"DTE {attempt['dte']} is outside the '{band['cadence']}' "
                 f"cadence band [{band['min_dte']}-{band['max_dte']}]"
+            )
+        elif attempt["roll_reason"] == "21_dte_management":
+            why = (
+                f"DTE {attempt['dte']} dropped to the management threshold "
+                f"({twenty_one_dte}); rolling early to dodge gamma risk "
+                "(tasty-style 21-DTE rule)"
             )
         else:
             why = (

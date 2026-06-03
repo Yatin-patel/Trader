@@ -17,7 +17,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, PositionsRepo, ProjectsRepo, WheelRepo
 from db.settings_store import ProjectSettings
 from execution import AlpacaClient
@@ -28,16 +28,15 @@ logger = logging.getLogger(__name__)
 def _record(project_id: str, mismatches: list[dict[str, Any]],
             auto_sync: bool) -> int:
     with session_scope() as s:
-        row = s.execute(text("""
+        recon_id = insert_returning_id(s, """
             INSERT INTO reconciliation_log
                 (project_id, mismatches, auto_sync, details)
-            OUTPUT INSERTED.recon_id
             VALUES (:p, :n, :as, :d)
-        """), {"p": project_id, "n": len(mismatches),
-               "as": 1 if auto_sync else 0,
-               "d": json.dumps(mismatches, default=str)}).fetchone()
+        """, {"p": project_id, "n": len(mismatches),
+              "as": 1 if auto_sync else 0,
+              "d": json.dumps(mismatches, default=str)})
         s.commit()
-        return int(row[0])
+        return recon_id
 
 
 def run_reconciliation(project_id: str, *, auto_sync: bool | None = None) -> dict[str, Any]:

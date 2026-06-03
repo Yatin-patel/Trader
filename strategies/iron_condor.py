@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
 from db.settings_store import ProjectSettings
 from execution import AlpacaClient
@@ -302,7 +302,7 @@ class IronCondorStrategy:
 
             # Record multi-leg order
             with session_scope() as s:
-                row = s.execute(text("""
+                order_id = insert_returning_id(s, """
                     INSERT INTO multi_leg_orders (
                         project_id, strategy_type, underlying, status,
                         leg1_symbol, leg1_side, leg1_qty,
@@ -311,14 +311,13 @@ class IronCondorStrategy:
                         leg4_symbol, leg4_side, leg4_qty,
                         net_credit, max_loss, max_profit, expiration
                     )
-                    OUTPUT INSERTED.order_id
                     VALUES (
                         :p, 'IRON_CONDOR', :und, 'OPEN',
                         :l1s, 'BUY', :qty, :l2s, 'SELL', :qty,
                         :l3s, 'SELL', :qty, :l4s, 'BUY', :qty,
                         :credit, :loss, :profit, :exp
                     )
-                """), {
+                """, {
                     "p": self.project_id,
                     "und": setup["ticker"],
                     "l1s": legs["long_put"]["symbol"],
@@ -330,7 +329,7 @@ class IronCondorStrategy:
                     "loss": setup["max_loss"],
                     "profit": setup["max_profit"],
                     "exp": setup["expiration"],
-                }).fetchone()
+                })
                 s.commit()
 
             order_id = int(row[0]) if row else None

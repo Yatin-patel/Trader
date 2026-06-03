@@ -20,7 +20,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import ProjectsRepo
 from db.settings_store import ProjectSettings
 from execution import AlpacaClient
@@ -101,14 +101,12 @@ def run_backtest(project_id: str, *, from_date: date, to_date: date,
         "csp_delta_max": delta_hi, "dte": dte,
     }
     with session_scope() as s:
-        row = s.execute(text("""
+        run_id = insert_returning_id(s, """
             INSERT INTO backtest_runs
                 (project_id, name, from_date, to_date, status, params)
-            OUTPUT INSERTED.run_id
             VALUES (:p, :n, :fd, :td, 'RUNNING', :pa)
-        """), {"p": project_id, "n": name, "fd": from_date,
-               "td": to_date, "pa": json.dumps(params_snapshot)}).fetchone()
-        run_id = int(row[0])
+        """, {"p": project_id, "n": name, "fd": from_date,
+              "td": to_date, "pa": json.dumps(params_snapshot)})
         s.commit()
 
     # Fetch bars for every ticker in one pass
@@ -232,11 +230,12 @@ def run_backtest(project_id: str, *, from_date: date, to_date: date,
 def list_runs(project_id: str, limit: int = 25) -> list[dict[str, Any]]:
     with session_scope() as s:
         rows = s.execute(text("""
-            SELECT TOP (:lim) run_id, name, from_date, to_date, started_at,
-                              completed_at, status
+            SELECT run_id, name, from_date, to_date, started_at,
+                   completed_at, status
             FROM backtest_runs
             WHERE project_id = :p
             ORDER BY run_id DESC
+            LIMIT :lim
         """), {"p": project_id, "lim": int(limit)}).fetchall()
     return [{
         "run_id": int(r[0]), "name": r[1],

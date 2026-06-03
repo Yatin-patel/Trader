@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from analytics.attribution import attribution_by_dimension
 from analytics.pnl_calculator import metrics_summary
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import ProjectsRepo
 from db.settings_store import ProjectSettings
 
@@ -119,16 +119,15 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
     changes = {k: v for k, v in changes.items() if k in _TUNABLE}
 
     with session_scope() as s:
-        row = s.execute(text("""
+        rec_id = insert_returning_id(s, """
             INSERT INTO ai_recommendations
                 (project_id, title, rationale, suggested_changes, status)
-            OUTPUT INSERTED.rec_id
             VALUES (:p, :t, :r, :c, 'pending')
-        """), {"p": project_id, "t": title,
-               "r": str(rationale)[:4000],
-               "c": json.dumps(changes)}).fetchone()
+        """, {"p": project_id, "t": title,
+              "r": str(rationale)[:4000],
+              "c": json.dumps(changes)})
         s.commit()
-        return {"rec_id": int(row[0]), "title": title,
+        return {"rec_id": rec_id, "title": title,
                 "rationale": rationale, "changes": changes}
 
 
@@ -141,11 +140,11 @@ def list_recommendations(project_id: str, *, limit: int = 20,
         params["st"] = status
     with session_scope() as s:
         rows = s.execute(text(
-            f"SELECT TOP (:lim) rec_id, created_at, title, rationale, "
+            f"SELECT rec_id, created_at, title, rationale, "
             f"suggested_changes, status, applied_at "
             f"FROM ai_recommendations "
             f"WHERE {' AND '.join(where)} "
-            f"ORDER BY rec_id DESC"
+            f"ORDER BY rec_id DESC LIMIT :lim"
         ), params).fetchall()
     out = []
     for r in rows:

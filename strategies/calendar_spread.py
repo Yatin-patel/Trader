@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
 from execution import AlpacaClient
 
@@ -253,21 +253,20 @@ class CalendarSpreadStrategy:
 
             # Record in database
             with session_scope() as s:
-                row = s.execute(text("""
+                order_id = insert_returning_id(s, """
                     INSERT INTO multi_leg_orders (
                         project_id, strategy_type, underlying, status,
                         leg1_symbol, leg1_side, leg1_qty,
                         leg2_symbol, leg2_side, leg2_qty,
                         net_credit, max_loss, expiration
                     )
-                    OUTPUT INSERTED.order_id
                     VALUES (
                         :p, 'CALENDAR_SPREAD', :und, 'OPEN',
                         :l1s, 'SELL', :qty,
                         :l2s, 'BUY', :qty,
                         :credit, :loss, :exp
                     )
-                """), {
+                """, {
                     "p": self.project_id,
                     "und": setup["ticker"],
                     "l1s": setup["short_leg"]["symbol"],
@@ -276,7 +275,7 @@ class CalendarSpreadStrategy:
                     "credit": -setup["net_debit"],  # Negative = debit
                     "loss": setup["max_loss"],
                     "exp": setup["short_leg"]["expiration"],
-                }).fetchone()
+                })
                 s.commit()
 
             order_id = int(row[0]) if row else None

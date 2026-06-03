@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from .connection import session_scope
+from .connection import insert_returning_id, session_scope
 
 
 class ChannelsRepo:
@@ -71,17 +71,16 @@ class ChannelsRepo:
                        "cid": channel_id, "p": project_id})
                 s.commit()
                 return channel_id
-            row = s.execute(text("""
+            channel_id = insert_returning_id(s, """
                 INSERT INTO notification_channels
                     (project_id, channel_type, name, target, config,
                      events_filter, enabled)
-                OUTPUT INSERTED.channel_id
                 VALUES (:p, :ct, :nm, :tg, :cf, :ef, :en)
-            """), {"p": project_id, "ct": channel_type, "nm": name,
+            """, {"p": project_id, "ct": channel_type, "nm": name,
                    "tg": target, "cf": cfg_text, "ef": evf_text,
-                   "en": 1 if enabled else 0}).fetchone()
+                   "en": 1 if enabled else 0})
             s.commit()
-            return int(row[0])
+            return channel_id
 
     @staticmethod
     def delete(project_id: str, channel_id: int) -> None:
@@ -119,17 +118,16 @@ class NotificationsRepo:
             severity = "info"
         payload_text = json.dumps(payload, default=str) if payload else None
         with session_scope() as s:
-            row = s.execute(text("""
+            notification_id = insert_returning_id(s, """
                 INSERT INTO notifications
                     (project_id, channel_id, title, body, severity,
                      event_type, payload, status)
-                OUTPUT INSERTED.notification_id
                 VALUES (:p, :cid, :t, :b, :sv, :et, :pl, :st)
-            """), {"p": project_id, "cid": channel_id, "t": title[:256],
+            """, {"p": project_id, "cid": channel_id, "t": title[:256],
                    "b": body, "sv": severity, "et": event_type,
-                   "pl": payload_text, "st": status}).fetchone()
+                   "pl": payload_text, "st": status})
             s.commit()
-            return int(row[0])
+            return channel_id
 
     @staticmethod
     def mark_sent(notification_id: int, ok: bool = True,
@@ -153,12 +151,13 @@ class NotificationsRepo:
         if unread_only:
             where.append("read_at IS NULL")
         sql = (
-            "SELECT TOP (:lim) notification_id, channel_id, title, body,"
+            "SELECT notification_id, channel_id, title, body,"
             " severity, event_type, payload, status, sent_at, read_at,"
             " created_at, error_message "
             "FROM notifications "
             f"WHERE {' AND '.join(where)} "
-            "ORDER BY notification_id DESC"
+            "ORDER BY notification_id DESC "
+            "LIMIT :lim"
         )
         with session_scope() as s:
             rows = s.execute(text(sql), params).fetchall()

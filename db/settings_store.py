@@ -93,7 +93,7 @@ class AppSettings:
     def get(key: str, default: Any = None) -> Any:
         with session_scope() as s:
             row = s.execute(
-                text("SELECT setting_value, value_type, is_secret FROM dbo.app_settings WHERE setting_key = :k"),
+                text("SELECT setting_value, value_type, is_secret FROM app_settings WHERE setting_key = :k"),
                 {"k": key},
             ).fetchone()
         if row is None:
@@ -110,25 +110,25 @@ class AppSettings:
             serialized = _encrypt(serialized)
         with session_scope() as s:
             existing = s.execute(
-                text("SELECT setting_key FROM dbo.app_settings WHERE setting_key = :k"),
+                text("SELECT setting_key FROM app_settings WHERE setting_key = :k"),
                 {"k": key},
             ).fetchone()
             if existing:
                 s.execute(
-                    text("""UPDATE dbo.app_settings
+                    text("""UPDATE app_settings
                             SET setting_value = :v,
                                 value_type = COALESCE(:vt, value_type),
                                 category = COALESCE(:c, category),
                                 description = COALESCE(:d, description),
                                 is_secret = :s,
-                                updated_at = SYSUTCDATETIME()
+                                updated_at = UTC_TIMESTAMP(6)
                             WHERE setting_key = :k"""),
                     {"k": key, "v": serialized, "vt": value_type, "c": category,
                      "d": description, "s": 1 if is_secret else 0},
                 )
             else:
                 s.execute(
-                    text("""INSERT INTO dbo.app_settings
+                    text("""INSERT INTO app_settings
                             (setting_key, setting_value, value_type, category, description, is_secret)
                             VALUES (:k, :v, :vt, :c, :d, :s)"""),
                     {"k": key, "v": serialized, "vt": value_type or "string", "c": category,
@@ -141,7 +141,7 @@ class AppSettings:
         with session_scope() as s:
             rows = s.execute(
                 text("""SELECT setting_key, setting_value, value_type, category, description, is_secret
-                        FROM dbo.app_settings ORDER BY category, setting_key""")
+                        FROM app_settings ORDER BY category, setting_key""")
             ).fetchall()
         out: list[SettingRow] = []
         for r in rows:
@@ -210,7 +210,7 @@ class ProjectSettings:
         with session_scope() as s:
             row = s.execute(
                 text("""SELECT setting_value, value_type
-                        FROM dbo.project_settings
+                        FROM project_settings
                         WHERE project_id = :p AND setting_key = :k"""),
                 {"p": project_id, "k": key},
             ).fetchone()
@@ -228,20 +228,20 @@ class ProjectSettings:
         serialized = _serialize(value, vt)
         with session_scope() as s:
             existing = s.execute(
-                text("""SELECT 1 FROM dbo.project_settings
+                text("""SELECT 1 FROM project_settings
                         WHERE project_id = :p AND setting_key = :k"""),
                 {"p": project_id, "k": key},
             ).fetchone()
             if existing:
                 s.execute(
-                    text("""UPDATE dbo.project_settings
-                            SET setting_value = :v, value_type = :vt, updated_at = SYSUTCDATETIME()
+                    text("""UPDATE project_settings
+                            SET setting_value = :v, value_type = :vt, updated_at = UTC_TIMESTAMP(6)
                             WHERE project_id = :p AND setting_key = :k"""),
                     {"p": project_id, "k": key, "v": serialized, "vt": vt},
                 )
             else:
                 s.execute(
-                    text("""INSERT INTO dbo.project_settings
+                    text("""INSERT INTO project_settings
                             (project_id, setting_key, setting_value, value_type)
                             VALUES (:p, :k, :v, :vt)"""),
                     {"p": project_id, "k": key, "v": serialized, "vt": vt},
@@ -253,7 +253,7 @@ class ProjectSettings:
         with session_scope() as s:
             rows = s.execute(
                 text("""SELECT setting_key, setting_value, value_type
-                        FROM dbo.project_settings WHERE project_id = :p"""),
+                        FROM project_settings WHERE project_id = :p"""),
                 {"p": project_id},
             ).fetchall()
         overrides = {r[0]: (r[1], r[2]) for r in rows}

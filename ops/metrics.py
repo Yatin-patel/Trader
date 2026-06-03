@@ -89,7 +89,7 @@ def collect_metrics() -> dict[str, Any]:
         ), {"c": cutoff_day}).fetchone()[0] or 0)
 
         last_backup = s.execute(text("""
-            SELECT TOP 1 status FROM backup_log ORDER BY backup_id DESC
+            SELECT status FROM backup_log ORDER BY backup_id DESC LIMIT 1
         """)).fetchone()
         if last_backup:
             out["backups"]["last_status"] = last_backup[0]

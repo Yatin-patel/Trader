@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from .connection import session_scope
+from .connection import insert_returning_id, session_scope
 
 
 class ClosedContractsRepo:
@@ -33,17 +33,16 @@ class ClosedContractsRepo:
         realized_pnl = float(premium_collected) - float(close_cost)
         snapshot_text = json.dumps(settings_snapshot, default=str) if settings_snapshot else None
         with session_scope() as s:
-            row = s.execute(text("""
+            closure_id = insert_returning_id(s, """
                 INSERT INTO closed_contracts
                     (contract_id, project_id, ticker, option_symbol, strategy_phase,
                      opened_at, closed_at, days_held, strike_price, quantity,
                      premium_collected, close_cost, realized_pnl, closure_reason,
                      delta_at_entry, dte_at_entry, underlying_at_entry,
                      underlying_at_close, settings_snapshot)
-                OUTPUT INSERTED.closure_id
                 VALUES (:cid, :p, :t, :os, :ph, :oa, :ca, :dh, :sk, :q,
                         :pc, :cc, :rp, :cr, :de, :dt, :ue, :uc, :ss)
-            """), {
+            """, {
                 "cid": contract_id, "p": project_id, "t": ticker, "os": option_symbol,
                 "ph": strategy_phase, "oa": opened_at, "ca": closed_at,
                 "dh": days_held, "sk": strike_price, "q": quantity,
@@ -51,9 +50,9 @@ class ClosedContractsRepo:
                 "cr": closure_reason, "de": delta_at_entry, "dt": dte_at_entry,
                 "ue": underlying_at_entry, "uc": underlying_at_close,
                 "ss": snapshot_text,
-            }).fetchone()
+            })
             s.commit()
-            return int(row[0])
+            return closure_id
 
     @staticmethod
     def list(project_id: str, *, since: datetime | None = None,
@@ -67,14 +66,15 @@ class ClosedContractsRepo:
             where.append("ticker = :tk")
             params["tk"] = ticker
         sql = (
-            "SELECT TOP (:lim) closure_id, contract_id, ticker, option_symbol,"
+            "SELECT closure_id, contract_id, ticker, option_symbol,"
             " strategy_phase, opened_at, closed_at, days_held, strike_price,"
             " quantity, premium_collected, close_cost, realized_pnl,"
             " closure_reason, delta_at_entry, dte_at_entry,"
             " underlying_at_entry, underlying_at_close, settings_snapshot "
             "FROM closed_contracts "
             f"WHERE {' AND '.join(where)} "
-            "ORDER BY closed_at DESC"
+            "ORDER BY closed_at DESC "
+            "LIMIT :lim"
         )
         with session_scope() as s:
             rows = s.execute(text(sql), params).fetchall()
@@ -103,7 +103,7 @@ class ClosedContractsRepo:
     def realized_pnl_since(project_id: str, since: datetime) -> float:
         with session_scope() as s:
             row = s.execute(text("""
-                SELECT ISNULL(SUM(realized_pnl), 0) FROM closed_contracts
+                SELECT COALESCE(SUM(realized_pnl), 0) FROM closed_contracts
                 WHERE project_id = :p AND closed_at >= :since
             """), {"p": project_id, "since": since}).fetchone()
         return float(row[0] or 0)
@@ -156,28 +156,27 @@ class ClosedPositionsRepo:
         days_held = max(0, (closed_at - opened_at).days)
         realized_pnl = (float(exit_price) - float(entry_price)) * quantity
         with session_scope() as s:
-            row = s.execute(text("""
+            closure_id = insert_returning_id(s, """
                 INSERT INTO closed_positions
                     (position_id, project_id, ticker, quantity, entry_price,
                      exit_price, opened_at, closed_at, days_held, realized_pnl,
                      closure_reason, associated_contract_id)
-                OUTPUT INSERTED.closure_id
                 VALUES (:pid, :p, :t, :q, :ep, :xp, :oa, :ca, :dh, :rp, :cr, :ac)
-            """), {
+            """, {
                 "pid": position_id, "p": project_id, "t": ticker,
                 "q": quantity, "ep": entry_price, "xp": exit_price,
                 "oa": opened_at, "ca": closed_at, "dh": days_held,
                 "rp": realized_pnl, "cr": closure_reason,
                 "ac": associated_contract_id,
-            }).fetchone()
+            })
             s.commit()
-            return int(row[0])
+            return closure_id
 
     @staticmethod
     def realized_pnl_since(project_id: str, since: datetime) -> float:
         with session_scope() as s:
             row = s.execute(text("""
-                SELECT ISNULL(SUM(realized_pnl), 0) FROM closed_positions
+                SELECT COALESCE(SUM(realized_pnl), 0) FROM closed_positions
                 WHERE project_id = :p AND closed_at >= :since
             """), {"p": project_id, "since": since}).fetchone()
         return float(row[0] or 0)
@@ -191,19 +190,18 @@ class PortfolioSnapshotsRepo:
                realized_pnl_day: float | None = None,
                unrealized_pnl: float | None = None) -> int:
         with session_scope() as s:
-            row = s.execute(text("""
+            snapshot_id = insert_returning_id(s, """
                 INSERT INTO portfolio_snapshots
                     (project_id, cash, buying_power, equity, long_market_value,
                      short_market_value, realized_pnl_day, unrealized_pnl)
-                OUTPUT INSERTED.snapshot_id
                 VALUES (:p, :c, :bp, :eq, :lmv, :smv, :rpd, :up)
-            """), {
+            """, {
                 "p": project_id, "c": cash, "bp": buying_power, "eq": equity,
                 "lmv": long_market_value, "smv": short_market_value,
                 "rpd": realized_pnl_day, "up": unrealized_pnl,
-            }).fetchone()
+            })
             s.commit()
-            return int(row[0])
+            return closure_id
 
     @staticmethod
     def curve(project_id: str, *, since: datetime,
@@ -233,11 +231,12 @@ class PortfolioSnapshotsRepo:
     def latest(project_id: str) -> dict[str, Any] | None:
         with session_scope() as s:
             row = s.execute(text("""
-                SELECT TOP 1 snapshot_at, cash, buying_power, equity,
+                SELECT snapshot_at, cash, buying_power, equity,
                        realized_pnl_day, unrealized_pnl
                 FROM portfolio_snapshots
                 WHERE project_id = :p
                 ORDER BY snapshot_at DESC
+                LIMIT 1
             """), {"p": project_id}).fetchone()
         if not row:
             return None
@@ -255,10 +254,11 @@ class PortfolioSnapshotsRepo:
         """First-ever snapshot — used as the project's starting balance."""
         with session_scope() as s:
             row = s.execute(text("""
-                SELECT TOP 1 snapshot_at, cash, buying_power, equity
+                SELECT snapshot_at, cash, buying_power, equity
                 FROM portfolio_snapshots
                 WHERE project_id = :p
                 ORDER BY snapshot_at ASC
+                LIMIT 1
             """), {"p": project_id}).fetchone()
         if not row:
             return None
@@ -277,10 +277,11 @@ class PortfolioSnapshotsRepo:
         """
         with session_scope() as s:
             row = s.execute(text("""
-                SELECT TOP 1 snapshot_at, equity
+                SELECT snapshot_at, equity
                 FROM portfolio_snapshots
                 WHERE project_id = :p AND snapshot_at >= :w
                 ORDER BY snapshot_at ASC
+                LIMIT 1
             """), {"p": project_id, "w": when}).fetchone()
         if not row:
             return None

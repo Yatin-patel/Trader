@@ -177,10 +177,56 @@ class MultiTenantRunner:
                       minute=0, id="ai_recommendations",
                       replace_existing=True)
 
+        # ---- DCA execution (hourly check) --------------------------
+        # The DCA module decides per-schedule whether NOW is the right
+        # moment for a buy based on next_execution_date; checking hourly
+        # keeps it cheap and catches the right moment within ~60 min.
+        async def _dca_tick():
+            from db.repositories import ProjectsRepo as _PR
+            try:
+                from strategies.dca import execute_due_schedules
+            except Exception:
+                logger.exception("DCA import failed")
+                return
+            try:
+                for proj in _PR.list_active():
+                    try:
+                        await asyncio.to_thread(execute_due_schedules,
+                                                proj.project_id)
+                    except Exception:
+                        logger.exception("DCA exec failed %s",
+                                         proj.project_id)
+            except Exception:
+                logger.exception("DCA tick error")
+        sched.add_job(_dca_tick, "interval", minutes=60,
+                      id="dca_execute", replace_existing=True)
+
+        # ---- Portfolio rebalancer (daily at 13:30 UTC = market open) ----
+        async def _rebalance_tick():
+            from db.repositories import ProjectsRepo as _PR
+            try:
+                from strategies.rebalancer import execute_rebalance
+            except Exception:
+                logger.exception("rebalancer import failed")
+                return
+            try:
+                for proj in _PR.list_active():
+                    try:
+                        await asyncio.to_thread(execute_rebalance,
+                                                proj.project_id)
+                    except Exception:
+                        logger.exception("rebalance failed %s",
+                                         proj.project_id)
+            except Exception:
+                logger.exception("rebalance tick error")
+        sched.add_job(_rebalance_tick, "cron", hour=13, minute=30,
+                      id="rebalancer", replace_existing=True)
+
         sched.start()
         self._scheduler = sched
         logger.info("schedulers running: digest@%02dUTC backup@%02dUTC "
-                    "recon=%dm orders=%ds anomalies=15m recs=weekly",
+                    "recon=%dm orders=%ds anomalies=15m recs=weekly "
+                    "dca=hourly rebalance@13:30UTC",
                     hour, backup_hour, recon_min, order_sec)
 
     async def _reconcile(self) -> None:

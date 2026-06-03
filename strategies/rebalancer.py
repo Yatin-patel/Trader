@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
 from execution import AlpacaClient
 
@@ -78,14 +78,13 @@ def set_target_allocation(
             s.commit()
             return existing[0]
         else:
-            row = s.execute(text("""
+            allocation_id = insert_returning_id(s, """
                 INSERT INTO target_allocations
                     (project_id, ticker, target_pct, rebalance_threshold_pct)
-                OUTPUT INSERTED.allocation_id
                 VALUES (:p, :t, :pct, :thresh)
-            """), {"p": project_id, "t": ticker.upper(), "pct": target_pct, "thresh": threshold_pct}).fetchone()
+            """, {"p": project_id, "t": ticker.upper(), "pct": target_pct, "thresh": threshold_pct})
             s.commit()
-            return int(row[0]) if row else 0
+            return allocation_id if row else 0
 
 
 def get_target_allocations(project_id: str) -> list[dict[str, Any]]:

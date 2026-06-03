@@ -128,11 +128,12 @@ def detect_anomalies(project_id: str) -> list[dict[str, Any]]:
 def list_anomalies(project_id: str, limit: int = 50) -> list[dict[str, Any]]:
     with session_scope() as s:
         rows = s.execute(text("""
-            SELECT TOP (:lim) anomaly_id, kind, detected_at, severity,
-                              baseline_value, observed_value, details
+            SELECT anomaly_id, kind, detected_at, severity,
+                   baseline_value, observed_value, details
             FROM anomalies
             WHERE project_id = :p
             ORDER BY anomaly_id DESC
+            LIMIT :lim
         """), {"p": project_id, "lim": int(limit)}).fetchall()
     import json as _json
     out = []

@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from .connection import session_scope
+from .connection import insert_returning_id, session_scope
 from .settings_store import _decrypt, _encrypt
 
 
@@ -93,7 +93,7 @@ class ProjectsRepo:
             # Validate UUID format to prevent SQL conversion errors
             if not _is_valid_uuid(user_id):
                 return []
-            sql += " AND user_id = TRY_CONVERT(UNIQUEIDENTIFIER, :u)"
+            sql += " AND user_id = :u"
             params["u"] = user_id
         with session_scope() as s:
             rows = s.execute(text(sql), params).fetchall()
@@ -107,7 +107,7 @@ class ProjectsRepo:
             # Validate UUID format to prevent SQL conversion errors
             if not _is_valid_uuid(user_id):
                 return []
-            sql += " WHERE user_id = TRY_CONVERT(UNIQUEIDENTIFIER, :u)"
+            sql += " WHERE user_id = :u"
             params["u"] = user_id
         with session_scope() as s:
             rows = s.execute(text(sql), params).fetchall()
@@ -125,7 +125,7 @@ class ProjectsRepo:
             # Validate UUID format to prevent SQL conversion errors
             if not _is_valid_uuid(user_id):
                 return None
-            sql += " AND user_id = TRY_CONVERT(UNIQUEIDENTIFIER, :u)"
+            sql += " AND user_id = :u"
             params["u"] = user_id
         with session_scope() as s:
             row = s.execute(text(sql), params).fetchone()
@@ -237,15 +237,14 @@ class PositionsRepo:
     def open_position(project_id: str, ticker: str, entry_price: float, quantity: int,
                       stop_loss_dollars: float) -> int:
         with session_scope() as s:
-            row = s.execute(text("""
+            position_id = insert_returning_id(s, """
                 INSERT INTO stock_positions
                     (project_id, ticker, entry_price, current_price, max_loss_threshold, quantity, status)
-                OUTPUT INSERTED.position_id
                 VALUES (:p, :t, :e, :e, :mlt, :q, 'OPEN')
-            """), {"p": project_id, "t": ticker, "e": entry_price,
-                   "mlt": entry_price - stop_loss_dollars, "q": quantity}).fetchone()
+            """, {"p": project_id, "t": ticker, "e": entry_price,
+                   "mlt": entry_price - stop_loss_dollars, "q": quantity})
             s.commit()
-            return int(row[0])
+            return position_id
 
     @staticmethod
     def list_open(project_id: str) -> list[dict[str, Any]]:
@@ -294,18 +293,17 @@ class WheelRepo:
         import json as _json
         snap_text = _json.dumps(settings_snapshot, default=str) if settings_snapshot else None
         with session_scope() as s:
-            row = s.execute(text("""
+            contract_id = insert_returning_id(s, """
                 INSERT INTO wheel_contracts
                     (project_id, ticker, strategy_phase, option_symbol, strike_price,
                      premium_collected, expiration_date, delta_at_entry, quantity,
                      underlying_at_entry, settings_snapshot)
-                OUTPUT INSERTED.contract_id
                 VALUES (:p, :t, :ph, :os, :sk, :pr, :ex, :d, :q, :ue, :ss)
-            """), {"p": project_id, "t": ticker, "ph": phase, "os": option_symbol,
+            """, {"p": project_id, "t": ticker, "ph": phase, "os": option_symbol,
                    "sk": strike, "pr": premium, "ex": expiration, "d": delta,
-                   "q": quantity, "ue": underlying_at_entry, "ss": snap_text}).fetchone()
+                   "q": quantity, "ue": underlying_at_entry, "ss": snap_text})
             s.commit()
-            return int(row[0])
+            return position_id
 
     @staticmethod
     def list_open(project_id: str) -> list[dict[str, Any]]:
@@ -390,10 +388,11 @@ class EventsRepo:
             where.append("event_id < :bid")
             params["bid"] = int(before_id)
         sql = (
-            "SELECT TOP (:lim) event_id, node_name, event_type, payload, created_at "
+            "SELECT event_id, node_name, event_type, payload, created_at "
             "FROM agent_events "
             f"WHERE {' AND '.join(where)} "
-            "ORDER BY event_id DESC"
+            "ORDER BY event_id DESC "
+            "LIMIT :lim"
         )
         with session_scope() as s:
             rows = s.execute(text(sql), params).fetchall()
@@ -413,10 +412,11 @@ class EventsRepo:
     def recent(project_id: str, limit: int = 50) -> list[dict[str, Any]]:
         with session_scope() as s:
             rows = s.execute(text("""
-                SELECT TOP (:lim) event_id, node_name, event_type, payload, created_at
+                SELECT event_id, node_name, event_type, payload, created_at
                 FROM agent_events
                 WHERE project_id = :p
                 ORDER BY created_at DESC
+                LIMIT :lim
             """), {"lim": limit, "p": project_id}).fetchall()
         out = []
         for r in rows:

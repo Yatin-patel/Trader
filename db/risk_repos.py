@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from .connection import session_scope
+from .connection import insert_returning_id, session_scope
 
 
 class RiskLimitsRepo:
@@ -64,17 +64,16 @@ class RiskLimitsRepo:
                        "lid": limit_id, "p": project_id})
                 s.commit()
                 return limit_id
-            row = s.execute(text("""
+            limit_id = insert_returning_id(s, """
                 INSERT INTO risk_limits
                     (project_id, limit_type, threshold, window_minutes,
                      action, enabled)
-                OUTPUT INSERTED.limit_id
                 VALUES (:p, :lt, :th, :wm, :a, :en)
-            """), {"p": project_id, "lt": limit_type, "th": threshold,
+            """, {"p": project_id, "lt": limit_type, "th": threshold,
                    "wm": window_minutes, "a": action,
-                   "en": 1 if enabled else 0}).fetchone()
+                   "en": 1 if enabled else 0})
             s.commit()
-            return int(row[0])
+            return limit_id
 
     @staticmethod
     def delete(project_id: str, limit_id: int) -> None:

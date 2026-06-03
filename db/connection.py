@@ -134,6 +134,17 @@ def session_scope() -> Session:
     return _SessionLocal()
 
 
+def insert_returning_id(s, insert_sql: str, params: dict) -> int:
+    """Run an INSERT and return the new auto-increment primary key.
+
+    Replaces the SQL-Server-only ``INSERT ... OUTPUT INSERTED.<col>``
+    pattern with a portable ``INSERT`` followed by ``LAST_INSERT_ID()``
+    that works on MySQL.
+    """
+    s.execute(text(insert_sql), params)
+    return int(s.execute(text("SELECT LAST_INSERT_ID()")).scalar() or 0)
+
+
 def init_database() -> None:
     """Create the database (if missing) and apply schema."""
     db_name = os.getenv("DB_NAME", "TraderDB")

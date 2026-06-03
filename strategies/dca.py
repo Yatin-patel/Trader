@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
 from execution import AlpacaClient
 
@@ -72,18 +72,17 @@ def create_dca_schedule(
         start_date = _next_execution_date(frequency)
 
     with session_scope() as s:
-        row = s.execute(text("""
+        schedule_id = insert_returning_id(s, """
             INSERT INTO dca_schedules
                 (project_id, ticker, frequency, amount_dollars, next_execution_date)
-            OUTPUT INSERTED.schedule_id
             VALUES (:p, :t, :f, :amt, :next)
-        """), {
+        """, {
             "p": project_id,
             "t": ticker.upper(),
             "f": frequency,
             "amt": amount_dollars,
             "next": start_date,
-        }).fetchone()
+        })
         s.commit()
 
     EventsRepo.log(project_id, "DCA", "SCHEDULE_CREATED", {
@@ -93,7 +92,7 @@ def create_dca_schedule(
         "start_date": start_date.isoformat(),
     })
 
-    return int(row[0]) if row else 0
+    return schedule_id if row else 0
 
 
 def _next_execution_date(frequency: str, from_date: date | None = None) -> date:

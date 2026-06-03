@@ -17,7 +17,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +29,13 @@ def _utcnow() -> datetime:
 def get_open_cycle(project_id: str, ticker: str) -> dict[str, Any] | None:
     with session_scope() as s:
         row = s.execute(text("""
-            SELECT TOP 1 cycle_id, status, started_at, total_premium,
-                         realized_pnl, csp_count, cc_count, assignment_count,
-                         cost_basis_adjusted
+            SELECT cycle_id, status, started_at, total_premium,
+                   realized_pnl, csp_count, cc_count, assignment_count,
+                   cost_basis_adjusted
             FROM wheel_cycles
             WHERE project_id = :p AND ticker = :t AND status = 'OPEN'
             ORDER BY started_at DESC
+            LIMIT 1
         """), {"p": project_id, "t": ticker}).fetchone()
     if not row:
         return None
@@ -53,13 +54,12 @@ def open_cycle(project_id: str, ticker: str) -> int:
     if existing:
         return existing["cycle_id"]
     with session_scope() as s:
-        row = s.execute(text("""
+        cycle_id = insert_returning_id(s, """
             INSERT INTO wheel_cycles (project_id, ticker, status)
-            OUTPUT INSERTED.cycle_id
             VALUES (:p, :t, 'OPEN')
-        """), {"p": project_id, "t": ticker}).fetchone()
+        """, {"p": project_id, "t": ticker})
         s.commit()
-        return int(row[0])
+        return cycle_id
 
 
 def record_csp_sold(project_id: str, ticker: str, contract_id: int,
@@ -165,13 +165,14 @@ def list_cycles(project_id: str, *, status: str | None = None,
         where.append("status = :st")
         params["st"] = status
     sql = (
-        "SELECT TOP (:lim) cycle_id, ticker, status, started_at, ended_at,"
+        "SELECT cycle_id, ticker, status, started_at, ended_at,"
         " total_premium, realized_pnl, csp_count, cc_count,"
         " assignment_count, cost_basis_adjusted, final_outcome,"
         " final_exit_price "
         "FROM wheel_cycles "
         f"WHERE {' AND '.join(where)} "
-        "ORDER BY started_at DESC"
+        "ORDER BY started_at DESC "
+        "LIMIT :lim"
     )
     with session_scope() as s:
         rows = s.execute(text(sql), params).fetchall()

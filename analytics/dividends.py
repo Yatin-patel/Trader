@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
 from execution import AlpacaClient
 
@@ -118,12 +118,11 @@ def record_dividend_event(
     total = amount * shares_held
 
     with session_scope() as s:
-        row = s.execute(text("""
+        event_id = insert_returning_id(s, """
             INSERT INTO dividend_events
                 (project_id, ticker, ex_date, record_date, pay_date, amount, shares_held, total_amount)
-            OUTPUT INSERTED.event_id
             VALUES (:p, :t, :ex, :rec, :pay, :amt, :shares, :total)
-        """), {
+        """, {
             "p": project_id,
             "t": ticker.upper(),
             "ex": ex_date,
@@ -132,10 +131,10 @@ def record_dividend_event(
             "amt": amount,
             "shares": shares_held,
             "total": total,
-        }).fetchone()
+        })
         s.commit()
 
-    return int(row[0]) if row else 0
+    return event_id if row else 0
 
 
 def list_dividend_events(
@@ -173,8 +172,7 @@ def list_dividend_events(
         sql += " AND status = :s"
         params["s"] = status
 
-    sql += " ORDER BY ex_date DESC"
-    sql = f"SELECT TOP ({limit}) * FROM ({sql}) AS sub"
+    sql += f" ORDER BY ex_date DESC LIMIT {int(limit)}"
 
     with session_scope() as s:
         rows = s.execute(text(sql), params).fetchall()
@@ -273,13 +271,13 @@ def dividend_summary(project_id: str) -> dict[str, Any]:
 
     with session_scope() as s:
         received = s.execute(text("""
-            SELECT ISNULL(SUM(total_amount), 0), COUNT(*)
+            SELECT COALESCE(SUM(total_amount), 0), COUNT(*)
             FROM dividend_events
             WHERE project_id = :p AND status = 'RECEIVED' AND ex_date >= :cutoff
         """), {"p": project_id, "cutoff": cutoff}).fetchone()
 
         pending = s.execute(text("""
-            SELECT ISNULL(SUM(total_amount), 0), COUNT(*)
+            SELECT COALESCE(SUM(total_amount), 0), COUNT(*)
             FROM dividend_events
             WHERE project_id = :p AND status = 'PENDING'
         """), {"p": project_id}).fetchone()

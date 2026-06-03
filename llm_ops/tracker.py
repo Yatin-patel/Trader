@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 
 # Rough per-1M-token USD prices (input/output). Free-tier models = 0.
 _PRICES: dict[str, tuple[float, float]] = {
@@ -35,18 +35,17 @@ def record_usage(*, project_id: str | None, purpose: str, provider: str,
     total = int(prompt_tokens) + int(completion_tokens)
     cost = _estimate_cost(model, int(prompt_tokens), int(completion_tokens))
     with session_scope() as s:
-        row = s.execute(text("""
+        usage_id = insert_returning_id(s, """
             INSERT INTO llm_usage
                 (project_id, purpose, provider, model, prompt_tokens,
                  completion_tokens, total_tokens, cost_usd, cache_hit)
-            OUTPUT INSERTED.usage_id
             VALUES (:p, :pp, :pv, :m, :it, :ot, :tt, :c, :ch)
-        """), {"p": project_id, "pp": purpose, "pv": provider, "m": model,
+        """, {"p": project_id, "pp": purpose, "pv": provider, "m": model,
                "it": int(prompt_tokens), "ot": int(completion_tokens),
                "tt": total, "c": float(cost),
-               "ch": 1 if cache_hit else 0}).fetchone()
+               "ch": 1 if cache_hit else 0})
         s.commit()
-        return int(row[0])
+        return usage_id
 
 
 def usage_summary(project_id: str | None = None) -> dict[str, Any]:
@@ -64,8 +63,8 @@ def usage_summary(project_id: str | None = None) -> dict[str, Any]:
     with session_scope() as s:
         # Totals all-time
         row = s.execute(text(
-            f"SELECT COUNT(*), ISNULL(SUM(total_tokens),0), "
-            f"ISNULL(SUM(cost_usd),0), ISNULL(SUM(CASE WHEN cache_hit=1 THEN 1 ELSE 0 END),0) "
+            f"SELECT COUNT(*), COALESCE(SUM(total_tokens),0), "
+            f"COALESCE(SUM(cost_usd),0), COALESCE(SUM(CASE WHEN cache_hit=1 THEN 1 ELSE 0 END),0) "
             f"FROM llm_usage {where_clause}"
         ), params).fetchone()
         out["all_time"] = {
@@ -76,8 +75,8 @@ def usage_summary(project_id: str | None = None) -> dict[str, Any]:
         today_params = {**params, "since": today}
         today_where = where_clause + (" AND " if where_clause else "WHERE ") + "created_at >= :since"
         row = s.execute(text(
-            f"SELECT COUNT(*), ISNULL(SUM(total_tokens),0), "
-            f"ISNULL(SUM(cost_usd),0) "
+            f"SELECT COUNT(*), COALESCE(SUM(total_tokens),0), "
+            f"COALESCE(SUM(cost_usd),0) "
             f"FROM llm_usage {today_where}"
         ), today_params).fetchone()
         out["today"] = {
@@ -88,8 +87,8 @@ def usage_summary(project_id: str | None = None) -> dict[str, Any]:
         month_where = where_clause + (" AND " if where_clause else "WHERE ") + "created_at >= :since"
         month_params = {**params, "since": last_30d}
         rows = s.execute(text(
-            f"SELECT model, COUNT(*), ISNULL(SUM(total_tokens),0), "
-            f"ISNULL(SUM(cost_usd),0) "
+            f"SELECT model, COUNT(*), COALESCE(SUM(total_tokens),0), "
+            f"COALESCE(SUM(cost_usd),0) "
             f"FROM llm_usage {month_where} GROUP BY model"
         ), month_params).fetchall()
         out["by_model_30d"] = [{
@@ -108,10 +107,10 @@ def list_usage(project_id: str | None = None, limit: int = 50) -> list[dict[str,
     where_clause = f"WHERE {' AND '.join(where)}" if where else ""
     with session_scope() as s:
         rows = s.execute(text(
-            f"SELECT TOP (:lim) usage_id, project_id, purpose, provider, model, "
+            f"SELECT usage_id, project_id, purpose, provider, model, "
             f"prompt_tokens, completion_tokens, total_tokens, cost_usd, "
             f"cache_hit, created_at FROM llm_usage {where_clause} "
-            f"ORDER BY usage_id DESC"
+            f"ORDER BY usage_id DESC LIMIT :lim"
         ), params).fetchall()
     return [{
         "usage_id": int(r[0]),

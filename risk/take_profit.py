@@ -59,9 +59,17 @@ def evaluate_take_profit(project_id: str) -> list[dict[str, Any]]:
     """Return list of close attempts (one per qualifying contract)."""
     if not ProjectSettings.get(project_id, "take_profit_enabled", default=True):
         return []
-    target_pct = float(ProjectSettings.get(project_id, "close_at_profit_pct", default=0.50))
-    if target_pct <= 0 or target_pct >= 1:
-        return []
+    # CSP and CC get separate profit thresholds. CCs default to 80% because
+    # rolling up-and-out at 80%+ extracts more premium than waiting; the
+    # extra theta from 50→80% isn't worth the gamma risk of holding through.
+    target_pct_csp = float(ProjectSettings.get(
+        project_id, "close_at_profit_pct", default=0.50))
+    target_pct_cc = float(ProjectSettings.get(
+        project_id, "close_at_profit_pct_cc", default=0.80))
+    if target_pct_csp <= 0 or target_pct_csp >= 1:
+        target_pct_csp = 0.50
+    if target_pct_cc <= 0 or target_pct_cc >= 1:
+        target_pct_cc = 0.80
 
     project = ProjectsRepo.get(project_id)
     if project is None:
@@ -99,6 +107,10 @@ def evaluate_take_profit(project_id: str) -> list[dict[str, Any]]:
             mid = (bid + ask) / 2
             premium_open = float(c["premium_collected"])
             qty = int(c.get("quantity") or 1)
+            # Per-phase profit target — CCs use the higher 80% by default.
+            phase = c.get("strategy_phase") or ""
+            target_pct = (target_pct_cc if phase == "COVERED_CALL"
+                          else target_pct_csp)
             target_close_price = premium_open * (1 - target_pct)
 
             if mid > target_close_price:

@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import ProjectsRepo
 from execution import AlpacaClient
 
@@ -34,19 +34,18 @@ def record_submission(project_id: str, *, alpaca_order_id: str,
         """), {"a": alpaca_order_id}).fetchone()
         if existing:
             return int(existing[0])
-        row = s.execute(text("""
+        order_id = insert_returning_id(s, """
             INSERT INTO orders
                 (project_id, alpaca_order_id, symbol, side, order_type,
                  qty, limit_price, status, terminal, related_contract_id)
-            OUTPUT INSERTED.order_id
             VALUES (:p, :a, :s, :sd, :ot, :q, :lp, :st, :t, :rcid)
-        """), {"p": project_id, "a": alpaca_order_id, "s": symbol,
-               "sd": side, "ot": order_type, "q": qty,
-               "lp": limit_price, "st": status,
-               "t": 1 if is_term else 0,
-               "rcid": related_contract_id}).fetchone()
+        """, {"p": project_id, "a": alpaca_order_id, "s": symbol,
+              "sd": side, "ot": order_type, "q": qty,
+              "lp": limit_price, "st": status,
+              "t": 1 if is_term else 0,
+              "rcid": related_contract_id})
         s.commit()
-        return int(row[0])
+        return order_id
 
 
 def poll_orders(project_id: str) -> dict[str, Any]:

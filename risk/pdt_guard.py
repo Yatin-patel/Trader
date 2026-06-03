@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
 from execution import AlpacaClient
 
@@ -51,7 +51,7 @@ def count_day_trades_5d(project_id: str) -> int:
             WHERE project_id = :p AND trade_date >= :cutoff
         """), {"p": project_id, "cutoff": cutoff}).fetchone()
 
-    return int(row[0]) if row else 0
+    return trade_id if row else 0
 
 
 def log_day_trade(
@@ -96,21 +96,20 @@ def log_day_trade(
         """))
         s.commit()
 
-        row = s.execute(text("""
+        trade_id = insert_returning_id(s, """
             INSERT INTO day_trade_log
                 (project_id, symbol, open_order_id, close_order_id, trade_date)
-            OUTPUT INSERTED.trade_id
             VALUES (:p, :sym, :open_id, :close_id, :td)
-        """), {
+        """, {
             "p": project_id,
             "sym": symbol,
             "open_id": open_order_id,
             "close_id": close_order_id,
             "td": trade_date,
-        }).fetchone()
+        })
         s.commit()
 
-    return int(row[0]) if row else 0
+    return trade_id if row else 0
 
 
 def get_account_equity(project_id: str) -> float | None:

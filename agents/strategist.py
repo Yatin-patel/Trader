@@ -74,12 +74,37 @@ def _select_contract(quotes: dict[str, Any], contracts: list[dict[str, Any]],
             )
             continue
         yield_pct = mid / strike
-        score = yield_pct - (spread_ratio * 0.01)
+        # Expected-value score (preferred when delta is present):
+        #   EV = mid * P(OTM) - assignment_cost * P(ITM)
+        # We approximate P(ITM) ≈ |delta| for short options (standard
+        # textbook approximation; rough but better than yield-only). The
+        # assignment_cost is the strike (we'd own shares at strike, no
+        # immediate loss but capital is tied up). We discount it by a
+        # nominal 1% cost-of-capital so the math favors not getting
+        # assigned without rejecting every trade.
+        delta_abs_v = abs(q.get("delta") or 0)
+        p_itm = max(0.0, min(0.95, delta_abs_v))   # cap for safety
+        p_otm = 1.0 - p_itm
+        ev_per_share = mid * p_otm - (strike * 0.01) * p_itm
+        # Normalize EV by strike so different price ranges compare fairly.
+        ev_score = ev_per_share / strike if strike > 0 else 0.0
+        # Final score blends EV with yield (2/3 EV, 1/3 yield) and gives
+        # a small bonus for tight spreads. Falling back to plain yield
+        # when delta is missing keeps the old behavior for chains without
+        # greeks.
+        if delta_abs_v > 0:
+            score = (2.0 / 3.0) * ev_score + (1.0 / 3.0) * yield_pct
+        else:
+            score = yield_pct
+        score -= spread_ratio * 0.01
         pass_filters.append({
             **c, **q,
             "mid": mid,
             "yield": yield_pct,
             "spread_ratio": spread_ratio,
+            "p_itm": p_itm,
+            "ev_per_share": ev_per_share,
+            "ev_score": ev_score,
             "score": score,
         })
 
@@ -507,16 +532,21 @@ def _strategist_reason(llm: BaseChatModel | None, ticker: str, kind: str,
         return {"approve": True, "rationale": "deterministic (no LLM configured)"}
 
     system = SystemMessage(content=(
-        "You are an income-maximizing options wheel underwriter. "
-        "Your job is to APPROVE trades aggressively to maximize premium captured. "
-        "The contract has already passed deterministic filters for delta band, "
-        "liquidity, and spread. APPROVE unless one of these is true: "
-        "(a) open_interest < 25 AND bid < 0.05, (b) bid/ask spread > 30% of mid, "
-        "(c) the underlying has obvious binary catastrophe risk (earnings inside DTE). "
-        "Do NOT reject for 'low yield' or 'low OI alone' — the deterministic selector "
-        "already picked the highest-yield contract in the configured envelope. "
-        "Respond with a single JSON object: {\"approve\": bool, \"rationale\": str}. "
-        "Default to approve=true."
+        "You are a conservative options-wheel risk reviewer. The contract has "
+        "ALREADY passed deterministic filters for delta band, liquidity, "
+        "spread, IV-rank, earnings window, and news sentiment. Your job is "
+        "NOT to re-approve — it is to flag ADDITIONAL risks the rule-based "
+        "filters can't see, such as: pending corporate actions, regulatory "
+        "investigations, sector-wide stress, executive scandals, dividend "
+        "ex-dates that risk early assignment, or unusual options activity "
+        "that suggests informed counterparties.\n\n"
+        "Default to approve=true (the deterministic filters did the heavy "
+        "lifting). REJECT only when you have specific, named, current "
+        "evidence of risk that those filters don't cover. A vague 'this "
+        "looks risky' is not enough — name the catalyst.\n\n"
+        "Respond with a single JSON object: "
+        "{\"approve\": bool, \"rationale\": str}. The rationale must cite "
+        "the SPECIFIC additional risk (or confirm none found)."
     ))
     payload = {
         "ticker": ticker,

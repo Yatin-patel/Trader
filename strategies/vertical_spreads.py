@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from db.connection import session_scope
+from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
 from execution import AlpacaClient
 
@@ -78,21 +78,20 @@ class VerticalSpreadStrategy:
         _ensure_multi_leg_table()
 
         with session_scope() as s:
-            row = s.execute(text("""
+            order_id = insert_returning_id(s, """
                 INSERT INTO multi_leg_orders (
                     project_id, strategy_type, underlying, status,
                     leg1_symbol, leg1_side, leg1_qty,
                     leg2_symbol, leg2_side, leg2_qty,
                     net_credit, max_loss, max_profit, expiration
                 )
-                OUTPUT INSERTED.order_id
                 VALUES (
                     :p, :strat, :und, 'OPEN',
                     :l1s, :l1side, :qty,
                     :l2s, :l2side, :qty,
                     :credit, :loss, :profit, :exp
                 )
-            """), {
+            """, {
                 "p": self.project_id,
                 "strat": strategy,
                 "und": ticker,
@@ -105,10 +104,10 @@ class VerticalSpreadStrategy:
                 "loss": max_loss,
                 "profit": abs(net_credit),
                 "exp": expiration,
-            }).fetchone()
+            })
             s.commit()
 
-        return int(row[0]) if row else 0
+        return order_id if row else 0
 
 
 class BullPutSpreadStrategy(VerticalSpreadStrategy):
