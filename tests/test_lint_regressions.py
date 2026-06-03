@@ -1,0 +1,220 @@
+"""Static regression checks for the specific bug classes that hit
+production this week. Each test corresponds to a real incident.
+
+If you find yourself adding a new ``# noqa`` to skip one of these, stop
+and read the test docstring — there was a reason it was added.
+"""
+from __future__ import annotations
+
+import ast
+import re
+from pathlib import Path
+
+import pytest
+
+
+def _docstring_line_set(src: str) -> set[int]:
+    """1-indexed line numbers occupied by docstrings.
+
+    Module/class/function docstrings often mention forbidden keywords
+    deliberately (e.g. "replaces the SQL-Server-only OUTPUT INSERTED
+    pattern"). Without this exclusion, the lint flags its own
+    explanation as a violation.
+    """
+    out: set[int] = set()
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return out
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not (isinstance(body, list) and body):
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            start = first.value.lineno
+            end = getattr(first.value, "end_lineno", None) or start
+            for ln in range(start, end + 1):
+                out.add(ln)
+    return out
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+# Files we lint. Excludes throwaway tooling and the SQL-Server-only
+# legacy schema (which deliberately still has those keywords).
+EXCLUDE_DIRS = {".venv", ".git", ".claude", ".github", "tests", "node_modules"}
+EXCLUDE_FILES = {"schema.sql"}
+
+
+def _live_files(suffixes: tuple[str, ...]) -> list[Path]:
+    out: list[Path] = []
+    for p in REPO_ROOT.rglob("*"):
+        if not p.is_file():
+            continue
+        if any(part in EXCLUDE_DIRS for part in p.parts):
+            continue
+        if p.name in EXCLUDE_FILES:
+            continue
+        if p.suffix not in suffixes:
+            continue
+        out.append(p)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 1. Forbidden SQL syntax — the codebase is MySQL-backed. SQL-Server-only
+#    keywords must not appear in live code, because pymysql will either
+#    500 or silently no-op when it hits them.
+# ---------------------------------------------------------------------------
+class TestNoForbiddenSqlSyntaxInLiveCode:
+    """The application talks to MySQL via pymysql. The project was
+    originally written for SQL Server and we migrated. Several
+    SQL-Server-specific operators kept showing up afterwards in code
+    that's now executed by MySQL. Each one breaks differently — some
+    500 the page, some fail silently inside a try/except — so we
+    lint them out explicitly rather than discovering them under load.
+
+    Incidents covered:
+      * TOP (n) ........... orders page, recon page, backups page (500)
+      * OUTPUT INSERTED ... reconciler, order poller, dividends, ai_recs
+                            (silent writes that never persist)
+      * SYSUTCDATETIME() . settings store (UPDATE ran but timestamp wrong)
+      * ISNULL(x, y) ..... llm_ops/tracker, analytics aggregations (500)
+      * TRY_CONVERT ...... /dashboard, /api/projects (500 on auth lookup)
+      * dbo.<table> ...... settings store (Unknown database 'dbo')
+    """
+
+    BANNED = [
+        # (regex, kind, hint)
+        (r"\bSELECT\s+TOP\s+", "TOP", "Use ORDER BY ... LIMIT :n at end"),
+        (r"\bOUTPUT\s+INSERTED\b", "OUTPUT INSERTED",
+         "Use db.connection.insert_returning_id helper"),
+        (r"\bSYSUTCDATETIME\s*\(\s*\)", "SYSUTCDATETIME",
+         "Use UTC_TIMESTAMP(6)"),
+        (r"\bISNULL\s*\(", "ISNULL", "Use COALESCE(x, y)"),
+        (r"\bTRY_CONVERT\s*\(", "TRY_CONVERT",
+         "Use direct equality — CHAR(36) collation is case-insensitive"),
+        (r"\bGETUTCDATE\s*\(\s*\)", "GETUTCDATE", "Use UTC_TIMESTAMP()"),
+        (r"\bNEWID\s*\(\s*\)", "NEWID", "Use UUID()"),
+        (r"\bdbo\.\w+", "dbo. prefix",
+         "Strip — MySQL doesn't use schema prefixes that way"),
+    ]
+
+    @pytest.mark.parametrize("pattern,kind,hint", BANNED)
+    def test_keyword_not_present(self, pattern, kind, hint):
+        compiled = re.compile(pattern, re.IGNORECASE)
+        offenders: list[str] = []
+        for f in _live_files((".py",)):
+            try:
+                src = f.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            doc_lines = _docstring_line_set(src)
+            for ln_i, ln in enumerate(src.splitlines(), 1):
+                # Skip docstrings (their content frequently *describes*
+                # the very keywords we forbid) and comment-only lines.
+                if ln_i in doc_lines:
+                    continue
+                if ln.lstrip().startswith("#"):
+                    continue
+                if compiled.search(ln):
+                    rel = f.relative_to(REPO_ROOT)
+                    offenders.append(f"{rel}:{ln_i}: {ln.strip()[:120]}")
+        assert not offenders, (
+            f"\n\n{kind} found in live code (use: {hint}):\n  "
+            + "\n  ".join(offenders[:10])
+            + ("\n  ..." if len(offenders) > 10 else "")
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2. insert_returning_id / return-name mismatches
+# ---------------------------------------------------------------------------
+def test_no_insert_returning_id_return_name_mismatch():
+    """My OUTPUT-INSERTED transformer occasionally left the WRONG variable
+    name on the return statement (e.g. inserted into ``snapshot_id`` but
+    returned ``closure_id`` which was undefined). Found three of these
+    in production today after they had been silently crashing the
+    portfolio snapshotter for hours. Lint them out."""
+    problems: list[str] = []
+    for f in _live_files((".py",)):
+        try:
+            src = f.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        lines = src.splitlines()
+        for i, line in enumerate(lines):
+            m = re.search(r"(\w+)\s*=\s*insert_returning_id\(", line)
+            if not m:
+                continue
+            assigned = m.group(1)
+            # Scan the next 25 lines for a return statement
+            for j in range(i + 1, min(i + 25, len(lines))):
+                rm = re.match(r"\s*return\s+(\w+)", lines[j])
+                if not rm:
+                    continue
+                returned = rm.group(1)
+                if returned == assigned:
+                    break
+                if returned in ("None", "True", "False"):
+                    break
+                rel = f.relative_to(REPO_ROOT)
+                problems.append(
+                    f"{rel}:{i+1}: assigned {assigned!r} but returns "
+                    f"{returned!r} at line {j+1}"
+                )
+                break
+    assert not problems, (
+        "\n\ninsert_returning_id assign/return mismatches "
+        "(would NameError at runtime):\n  " + "\n  ".join(problems)
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3. Concentration math must use stable reference, not options_bp.
+# ---------------------------------------------------------------------------
+def test_concentration_module_uses_stable_reference():
+    """concentration.py must NOT bake in ``buying_power`` as its
+    multiplier. The fix earlier today routes through ``_resolve_reference``
+    which prefers ``project.max_equity_allocation``. Regressing this
+    silently re-introduces the "trading stops after a few hours" bug."""
+    src = (REPO_ROOT / "risk" / "concentration.py").read_text(encoding="utf-8")
+    # The cap calculation line must reference 'reference', not raw bp.
+    has_resolve = "_resolve_reference" in src
+    assert has_resolve, (
+        "risk/concentration.py no longer calls _resolve_reference — "
+        "the cap will use fluctuating options_buying_power again and "
+        "silently block trades once the project has a few positions open."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. systemd unit (in deploy scripts) must use main.py all, not api.
+# ---------------------------------------------------------------------------
+def test_deploy_scripts_use_main_py_all():
+    """The systemd ExecStart was wrong for half a day — set to
+    ``main.py api`` (autorun=False), so the FastAPI app came up but the
+    MultiTenantRunner (Scanner/Strategist/Guardrail/Executor) never
+    spawned. Service looked healthy, agents were dead. Lint that out."""
+    offenders = []
+    for f in _live_files((".py", ".sh", ".bat", ".ps1", ".service")):
+        try:
+            src = f.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        # Skip the explicit dual-mode helpers (we DO want to mention
+        # "main.py api" in docstrings or migration notes).
+        for ln_i, ln in enumerate(src.splitlines(), 1):
+            if "ExecStart" not in ln:
+                continue
+            if "main.py api" in ln:
+                offenders.append(
+                    f"{f.relative_to(REPO_ROOT)}:{ln_i}: {ln.strip()}"
+                )
+    assert not offenders, (
+        "\n\nDeploy artifacts have ExecStart=python main.py api — that "
+        "starts the API without the runner, no agents will fire:\n  "
+        + "\n  ".join(offenders)
+    )

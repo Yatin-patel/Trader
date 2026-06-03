@@ -211,10 +211,21 @@ class TenantWorker:
             "execution_status": "SCANNING",
         }
         final_state = await asyncio.to_thread(self._graph.invoke, initial)
+        # NB: the executor clears `selected_trades` from state when it
+        # returns (so the graph doesn't loop and re-submit). The trade
+        # count for this LOOP must therefore come from execution_results,
+        # not selected_trades, or this counter will always read 0 even
+        # when orders were actually submitted.
+        exec_results = final_state.get("execution_results") or []
+        submitted_count = sum(
+            1 for r in exec_results
+            if str(r.get("status") or "").upper() in ("SUBMITTED", "DRY_RUN")
+        )
         EventsRepo.log(self.project_id, "Worker", "LOOP", {
             "cycle": self._cycle_count,
             "final_status": final_state.get("execution_status"),
-            "trades": len(final_state.get("selected_trades") or []),
+            "trades": submitted_count,
+            "results_count": len(exec_results),
         })
 
         # --- Analytics: closure detection + portfolio snapshot ---------------

@@ -48,13 +48,12 @@ def run_backup() -> dict[str, Any]:
     filename = f"{db_name}_{ts}.bak"
     full_path = os.path.join(bdir, filename)
 
+    from db.connection import insert_returning_id
     with session_scope() as s:
-        row = s.execute(text("""
+        backup_id = insert_returning_id(s, """
             INSERT INTO backup_log (started_at, status, path)
-            OUTPUT INSERTED.backup_id
             VALUES (UTC_TIMESTAMP(), 'RUNNING', :p)
-        """), {"p": full_path}).fetchone()
-        backup_id = int(row[0])
+        """, {"p": full_path})
         s.commit()
 
     # Run the actual BACKUP. SQL Server refuses to BACKUP inside a
