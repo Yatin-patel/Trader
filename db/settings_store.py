@@ -70,7 +70,14 @@ def _decrypt(value: str | None) -> str | None:
         fernet = _get_fernet()
         if fernet is None:
             return ""
-        return fernet.decrypt(value[5:].encode()).decode()
+        try:
+            return fernet.decrypt(value[5:].encode()).decode()
+        except Exception:
+            # The value was encrypted with a DIFFERENT Fernet key than the
+            # one currently in SECRET_ENCRYPTION_KEY. Returning a sentinel
+            # so the UI can show "needs reset" rather than 500'ing the
+            # whole settings page.
+            return "<<decrypt failed — re-enter this value>>"
     return value
 
 
@@ -196,10 +203,16 @@ class ProjectSettings:
         "auto_roll_enabled":             (True,    "bool",   "Automatically roll a contract approaching expiration"),
         "auto_roll_dte_threshold":       (2,       "int",    "Days-to-expiration that triggers an auto-roll attempt"),
         "min_iv_rank":                   (0.0,     "float",  "Skip tickers whose 1-year realized-vol rank is below this (0 = disabled)"),
-        "news_sentiment_filter":         (False,   "bool",   "Skip tickers with strongly negative recent news sentiment"),
-        "news_sentiment_min":            (-0.30,   "float",  "Skip if recent sentiment score is below this (-1..+1)"),
+        "news_sentiment_filter":         (True,    "bool",   "Skip tickers with strongly negative recent news sentiment (uses Alpaca News + VADER for instant scoring)"),
+        "news_sentiment_min":            (-0.50,   "float",  "Block when the worst headline's VADER compound score is below this (-1..+1). Default -0.5 blocks on moderately-negative-or-worse headlines."),
+        "skip_event_days_within":        (3,       "int",    "Block new option positions when a major economic event (FOMC/CPI/NFP) falls within this many calendar days. 0 = disabled."),
+        "skip_on_fomc_days":             (True,    "bool",   "Apply the economic-event filter for FOMC rate decisions (binary vol)"),
+        "skip_on_cpi_days":              (True,    "bool",   "Apply the economic-event filter for CPI release days (8:30am ET surprise)"),
+        "skip_on_nfp_days":              (True,    "bool",   "Apply the economic-event filter for NFP / jobs report Fridays"),
+        "skip_on_pce_days":              (False,   "bool",   "Apply the economic-event filter for PCE inflation. Off by default — smaller market impact than CPI/FOMC."),
         "loop_interval_seconds":         (60,      "int",    "Seconds between scan->execute cycles for this project (overrides global)"),
         "order_time_in_force":           ("day",   "string", "Default time-in-force for submitted orders"),
+        "strategy_mode":                 ("wheel", "string", "What this project trades: 'wheel' (CSP+CC options income — default), 'wheel_plus_dca' (options + scheduled stock buys), 'dca_only' (long-term stock accumulation, no options), 'paused' (don't trade — for manual review). Day-trading and multi-leg spreads are not yet implemented."),
         "use_extended_hours":            (False,   "bool",   "Allow trades during extended hours"),
         "income_cadence":                ("custom","string", "Income cadence preset: weekly | biweekly | monthly | custom. When set to a preset, the strategist overrides csp_min_dte / csp_max_dte / csp_delta_min / csp_delta_max with the preset values, and auto-roll will roll any open contract whose remaining DTE drifts outside the preset band."),
         "dry_run":                       (True,    "bool",   "If true, skip order submission and only log decisions"),

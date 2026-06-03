@@ -46,3 +46,7 @@ requests-oauthlib==2.0.0
 
 # Earnings calendar (Yahoo Finance scrape, no API key)
 yfinance==0.2.50
+
+# News sentiment — VADER lexicon scoring. Pure-Python, ~125 KB, instant.
+# Used by risk/news.py to score headlines without an LLM round-trip.
+vaderSentiment==3.3.2

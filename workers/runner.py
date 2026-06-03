@@ -183,6 +183,7 @@ class MultiTenantRunner:
         # keeps it cheap and catches the right moment within ~60 min.
         async def _dca_tick():
             from db.repositories import ProjectsRepo as _PR
+            from db.settings_store import ProjectSettings as _PS
             try:
                 from strategies.dca import execute_due_schedules
             except Exception:
@@ -190,6 +191,12 @@ class MultiTenantRunner:
                 return
             try:
                 for proj in _PR.list_active():
+                    # Only run DCA for projects whose strategy_mode
+                    # explicitly includes it.
+                    mode = str(_PS.get(proj.project_id, "strategy_mode",
+                                       default="wheel") or "wheel").lower()
+                    if mode not in ("wheel_plus_dca", "dca_only"):
+                        continue
                     try:
                         await asyncio.to_thread(execute_due_schedules,
                                                 proj.project_id)

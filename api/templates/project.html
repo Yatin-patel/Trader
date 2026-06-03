@@ -113,6 +113,22 @@
     <button class="btn ghost small" id="toggle-settings">Show</button>
   </header>
   <form class="settings-form" data-project-id="{{ project.project_id }}" id="project-settings-form" style="display:none;">
+    {% set bool_help = {
+      'true':  'Enabled — this behavior is ON.',
+      'false': 'Disabled — this behavior is OFF.'
+    } %}
+    {% set cadence_help = {
+      'custom':   'Use the explicit csp_min_dte / csp_max_dte / delta values below. Power-user mode — you control DTE and delta directly.',
+      'weekly':   'Sells short-dated puts (5-10 DTE) at delta 0.20-0.30. Smaller premium per trade but ~50 trades/year; more management overhead. Good for active traders.',
+      'biweekly': 'Sells 12-18 DTE puts at delta 0.25-0.35. Balanced premium/management. The default for income-focused wheel.',
+      'monthly':  'Sells 25-35 DTE puts at delta 0.25-0.40. Largest premiums, ~12 trades/year, capital locked up longest. Best premium-to-management ratio for a hands-off wheel.'
+    } %}
+    {% set strategy_mode_help = {
+      'wheel':          'Options income. Sells cash-secured puts on your watchlist; if assigned, sells covered calls against the shares. Pure options + collected-premium income. (Default — what most projects should run.)',
+      'wheel_plus_dca': 'Wheel (above) + scheduled dollar-cost-averaging stock buys on tickers you set up in DCA. Options income AND steady long-term stock accumulation in parallel.',
+      'dca_only':       'No options. Just runs your DCA schedules to buy stock on a cadence (daily / weekly / monthly). Long-term stock accumulation. Tax-lot accounting tracks holding period for capital-gains.',
+      'paused':         'Project does nothing. The runner skips all cycles. Use this for manual review, broker-side maintenance, or pausing without deleting the project.'
+    } %}
     {% for s in project_settings %}
     <div class="setting-row" data-key="{{ s.key }}" data-type="{{ s.value_type }}">
       <div class="setting-meta">
@@ -121,14 +137,20 @@
       </div>
       <div class="setting-value">
         {% if s.value_type == 'bool' %}
-          <select data-value>
-            <option value="true" {% if s.value %}selected{% endif %}>true</option>
-            <option value="false" {% if not s.value %}selected{% endif %}>false</option>
+          <select data-value data-help-map='{{ bool_help | tojson }}'>
+            <option value="true" {% if s.value %}selected{% endif %} title="{{ bool_help['true'] }}">true</option>
+            <option value="false" {% if not s.value %}selected{% endif %} title="{{ bool_help['false'] }}">false</option>
           </select>
         {% elif s.key == 'income_cadence' %}
-          <select data-value>
+          <select data-value data-help-map='{{ cadence_help | tojson }}'>
             {% for opt in ['custom', 'weekly', 'biweekly', 'monthly'] %}
-              <option value="{{ opt }}" {% if s.value == opt %}selected{% endif %}>{{ opt }}</option>
+              <option value="{{ opt }}" {% if s.value == opt %}selected{% endif %} title="{{ cadence_help[opt] }}">{{ opt }}</option>
+            {% endfor %}
+          </select>
+        {% elif s.key == 'strategy_mode' %}
+          <select data-value data-help-map='{{ strategy_mode_help | tojson }}'>
+            {% for opt in ['wheel', 'wheel_plus_dca', 'dca_only', 'paused'] %}
+              <option value="{{ opt }}" {% if s.value == opt %}selected{% endif %} title="{{ strategy_mode_help[opt] }}">{{ opt }}</option>
             {% endfor %}
           </select>
         {% else %}
@@ -136,10 +158,49 @@
         {% endif %}
         <button class="btn small primary" data-action="save-project">Save</button>
       </div>
+      <!-- Inline help text — updates when an enum/bool value changes. -->
+      <div class="setting-help muted" data-help></div>
     </div>
     {% endfor %}
   </form>
 </section>
 
-<script src="/static/project_dashboard.js?v=4"></script>
+<style>
+  /* Inline help that explains what the currently-selected enum/bool means.
+     Stays below the select+save row, visually grouped with the setting. */
+  .setting-help {
+    grid-column: 1 / -1;
+    font-size: 0.85em;
+    padding: 4px 0 8px 0;
+    color: var(--muted, #6b7280);
+    line-height: 1.4;
+    min-height: 1em;
+  }
+  .setting-help:empty { display: none; }
+  .setting-help::before { content: '↳ '; opacity: 0.6; }
+</style>
+
+<script>
+  // Populate inline help under every dropdown that has a data-help-map.
+  // Updates on change. Runs once on load for the initial selected value.
+  (function () {
+    function refresh(select) {
+      const row = select.closest('.setting-row');
+      if (!row) return;
+      const help = row.querySelector('[data-help]');
+      if (!help) return;
+      let map;
+      try {
+        map = JSON.parse(select.dataset.helpMap || '{}');
+      } catch (e) { return; }
+      help.textContent = map[select.value] || '';
+    }
+    document.querySelectorAll('select[data-help-map]').forEach((sel) => {
+      refresh(sel);
+      sel.addEventListener('change', () => refresh(sel));
+    });
+  })();
+</script>
+
+<script src="/static/project_dashboard.js?v=5"></script>
 {% endblock %}

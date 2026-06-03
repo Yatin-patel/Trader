@@ -175,6 +175,8 @@ def build_tools(project_id: str | None) -> list[Tool]:
     _ENUM_VALUES = {
         "income_cadence":      {"custom", "weekly", "biweekly", "monthly"},
         "order_time_in_force": {"day", "gtc", "opg", "cls", "ioc", "fok"},
+        "strategy_mode":       {"wheel", "wheel_plus_dca",
+                                "dca_only", "paused"},
     }
 
     @_safe

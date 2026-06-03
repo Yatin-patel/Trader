@@ -303,7 +303,7 @@ class WheelRepo:
                    "sk": strike, "pr": premium, "ex": expiration, "d": delta,
                    "q": quantity, "ue": underlying_at_entry, "ss": snap_text})
             s.commit()
-            return position_id
+            return contract_id
 
     @staticmethod
     def list_open(project_id: str) -> list[dict[str, Any]]:

@@ -211,10 +211,48 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
     min_iv_rank = float(ProjectSettings.get(project_id, "min_iv_rank", default=0.0) or 0.0)
     news_filter_on = bool(ProjectSettings.get(project_id, "news_sentiment_filter", default=False))
     news_min_score = float(ProjectSettings.get(project_id, "news_sentiment_min", default=-0.30))
+    # Market-wide economic-event gate — applied ONCE per cycle for all
+    # tickers (it's the same regardless of underlying).
+    skip_event_days = int(ProjectSettings.get(
+        project_id, "skip_event_days_within", default=3) or 0)
+    event_kinds: list[str] = []
+    if ProjectSettings.get(project_id, "skip_on_fomc_days", default=True):
+        event_kinds.append("fomc")
+    if ProjectSettings.get(project_id, "skip_on_cpi_days", default=True):
+        event_kinds.append("cpi")
+    if ProjectSettings.get(project_id, "skip_on_nfp_days", default=True):
+        event_kinds.append("nfp")
+    if ProjectSettings.get(project_id, "skip_on_pce_days", default=False):
+        event_kinds.append("pce")
+    blocking_event = ""
+    if skip_event_days > 0 and event_kinds:
+        from risk.economic_calendar import is_event_within
+        hit, label = is_event_within(skip_event_days, kinds=event_kinds)
+        if hit:
+            blocking_event = label
 
     for ticker in tickers:
         try:
             phase = _existing_phase(project_id, ticker, equity_positions)
+
+            # Market-wide economic event gate: blocks ALL new positions
+            # in the days leading up to FOMC / CPI / NFP. Applies even
+            # before snapshot fetch — no point burning API calls.
+            if blocking_event:
+                rejections.append({"ticker": ticker,
+                                   "reason": f"economic event: {blocking_event}"})
+                EventsRepo.log(project_id, "Strategist", "SELECTION", {
+                    "ticker": ticker, "outcome": "economic_event_skip",
+                    "event": blocking_event,
+                    "narrative": [
+                        f"Skipping {ticker}: market-wide economic event "
+                        f"({blocking_event}) within "
+                        f"{skip_event_days} day(s). Binary intraday vol "
+                        "could break the delta/IV thesis.",
+                    ],
+                })
+                continue
+
             snap = client.snapshots([ticker]).get(ticker)
             if snap is None or snap.last_price <= 0:
                 rejections.append({"ticker": ticker, "reason": "no snapshot"})

@@ -152,6 +152,30 @@ class TenantWorker:
         if project is None or not project.is_active:
             return self._cycle_interval()
 
+        # --- Strategy mode gate ----------------------------------------------
+        # The wheel pipeline (Scanner→Strategist→Guardrail→Executor) only
+        # runs when the project's strategy_mode includes options trading.
+        # DCA + Rebalancer + reconciliation are scheduled separately in
+        # MultiTenantRunner so they keep running regardless of mode.
+        mode = str(ProjectSettings.get(self.project_id, "strategy_mode",
+                                       default="wheel") or "wheel").lower()
+        if mode == "paused":
+            EventsRepo.log(self.project_id, "Worker", "LOOP", {
+                "skipped": "strategy_mode_paused",
+                "mode": mode,
+            })
+            return self._cycle_interval()
+        if mode == "dca_only":
+            EventsRepo.log(self.project_id, "Worker", "LOOP", {
+                "skipped": "strategy_mode_dca_only",
+                "mode": mode,
+                "note": "DCA buys still run on the hourly scheduler",
+            })
+            return self._cycle_interval()
+        # 'wheel' and 'wheel_plus_dca' both run the wheel pipeline here.
+        # ('wheel_plus_dca' just adds DCA on top — DCA runs from the
+        # MultiTenantRunner scheduler, not from this per-tenant worker.)
+
         client = AlpacaClient(project)
 
         # --- HARD GATE: market hours -----------------------------------------

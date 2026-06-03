@@ -201,7 +201,7 @@ class PortfolioSnapshotsRepo:
                 "rpd": realized_pnl_day, "up": unrealized_pnl,
             })
             s.commit()
-            return closure_id
+            return snapshot_id
 
     @staticmethod
     def curve(project_id: str, *, since: datetime,

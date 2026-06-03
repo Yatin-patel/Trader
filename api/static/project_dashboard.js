@@ -12,6 +12,12 @@
     if (isNaN(n)) return String(v);
     return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
   };
+  // All timestamps in the UI are rendered in US/Eastern (the market's
+  // timezone) so the user doesn't have to translate UTC or their local
+  // timezone into market time when scanning recent activity. DST is
+  // handled automatically by Intl.DateTimeFormat.
+  const ET_TZ = "America/New_York";
+  const fmtET = (d, opts) => d.toLocaleString("en-US", { timeZone: ET_TZ, ...(opts || {}) });
   const fmtTime = (iso) => {
     if (!iso) return "";
     const d = new Date(iso);
@@ -20,7 +26,13 @@
     const diff = (now - d) / 1000;
     if (diff < 60) return `${Math.floor(diff)}s ago`;
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    return d.toLocaleString();
+    // Anything older than an hour: show full ET timestamp so the user
+    // can correlate with the market clock.
+    return fmtET(d, {
+      month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit",
+      hour12: false, timeZoneName: "short",
+    });
   };
 
   const PIPE_NODES = ["Scanner", "Strategist", "Guardrail", "Executor"];
@@ -36,7 +48,10 @@
     rb.textContent = active ? "runner: ACTIVE" : "runner: INACTIVE";
     rb.className = "badge " + (active ? "ok" : "danger");
 
-    document.getElementById("last-update").textContent = "updated " + new Date().toLocaleTimeString();
+    document.getElementById("last-update").textContent = "updated " + fmtET(new Date(), {
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hour12: false, timeZoneName: "short",
+    });
   }
 
   function renderAccount(snap) {
@@ -60,7 +75,9 @@
     startEl.textContent = fmtMoney(d.starting_balance);
     if (d.starting_at) {
       const dt = new Date(d.starting_at);
-      startSub.textContent = "since " + dt.toLocaleDateString();
+      startSub.textContent = "since " + fmtET(dt, {
+        month: "short", day: "numeric", year: "numeric",
+      });
     } else {
       startSub.textContent = "from project allocation";
     }

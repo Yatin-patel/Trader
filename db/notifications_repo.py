@@ -127,7 +127,7 @@ class NotificationsRepo:
                    "b": body, "sv": severity, "et": event_type,
                    "pl": payload_text, "st": status})
             s.commit()
-            return channel_id
+            return notification_id
 
     @staticmethod
     def mark_sent(notification_id: int, ok: bool = True,
