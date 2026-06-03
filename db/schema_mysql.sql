@@ -528,3 +528,40 @@ CREATE TABLE IF NOT EXISTS trade_journal (
     FOREIGN KEY (project_id) REFERENCES trading_projects(project_id) ON DELETE CASCADE,
     INDEX IX_trade_journal_project_date (project_id, trade_date DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 33. Earnings cache — keyed by ticker, refreshed from yfinance
+CREATE TABLE IF NOT EXISTS earnings_cache (
+    ticker              VARCHAR(12) NOT NULL PRIMARY KEY,
+    next_earnings_date  DATE NULL,
+    fetched_at          DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    source              VARCHAR(32) NOT NULL DEFAULT 'yfinance'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 34. Market outlook cache — composite PK on (ticker, horizon_days)
+CREATE TABLE IF NOT EXISTS market_outlook_cache (
+    ticker         VARCHAR(12) NOT NULL,
+    horizon_days   INT NOT NULL,
+    quant_json     LONGTEXT NULL,
+    llm_text       LONGTEXT NULL,
+    confidence     VARCHAR(16) NULL,
+    direction      VARCHAR(16) NULL,
+    generated_at   DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (ticker, horizon_days)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 35. User preferences — one row per user
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id          CHAR(36) NOT NULL PRIMARY KEY,
+    default_broker   VARCHAR(16) NOT NULL DEFAULT 'alpaca',
+    updated_at       DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Column additions that drifted in from SQL Server.
+-- These ALTERs are idempotent via the schema applier (which catches
+-- "Duplicate column" errors).
+ALTER TABLE trading_projects
+    ADD COLUMN etrade_token_renewed_at DATETIME(6) NULL;
+ALTER TABLE backtest_runs
+    ADD COLUMN from_date DATE NOT NULL DEFAULT '1970-01-01';
+ALTER TABLE wheel_contracts
+    ADD COLUMN settings_snapshot LONGTEXT NULL;
