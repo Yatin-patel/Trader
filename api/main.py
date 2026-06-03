@@ -1829,6 +1829,26 @@ async def api_delete_project(request: Request, project_id: str):
     return {"ok": True}
 
 
+# ---------- REST: tax lots ---------------------------------------------------
+
+@app.get("/api/projects/{project_id}/tax_lots/open")
+async def api_open_tax_lots(request: Request, project_id: str,
+                            ticker: str | None = None):
+    _scoped_project(project_id, request)
+    from analytics.tax_lots import open_lots
+    return {"lots": open_lots(project_id, ticker)}
+
+
+@app.get("/api/projects/{project_id}/tax_lots/capital_gains")
+async def api_capital_gains(request: Request, project_id: str,
+                            year: int | None = None):
+    _scoped_project(project_id, request)
+    from analytics.tax_lots import capital_gains_summary
+    from datetime import datetime, timezone
+    yr = year or datetime.now(tz=timezone.utc).year
+    return capital_gains_summary(project_id, int(yr))
+
+
 # ---------- REST: per-project settings ---------------------------------------
 
 @app.get("/api/projects/{project_id}/settings")

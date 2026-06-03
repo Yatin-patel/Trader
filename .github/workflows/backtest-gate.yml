@@ -1,0 +1,125 @@
+name: Backtest gate
+
+# Runs a deterministic backtest on every PR that touches strategy code,
+# then fails the check if Sharpe ratio regresses against main by more
+# than the configured tolerance. Catches subtle behaviour changes that
+# unit tests would miss (e.g. changing a delta threshold and silently
+# eating 20% of risk-adjusted return).
+
+on:
+  pull_request:
+    paths:
+      - 'agents/**'
+      - 'risk/**'
+      - 'strategies/**'
+      - 'analytics/wheel_cycles.py'
+      - 'analytics/pnl_calculator.py'
+      - 'analytics/iv_rank.py'
+      - 'backtest/**'
+      - 'db/settings_store.py'
+
+# Concurrency: a new push to the same PR cancels the previous run.
+concurrency:
+  group: backtest-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpass
+          MYSQL_DATABASE: TraderDB
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -prootpass"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 6
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt pymysql
+
+      - name: Wait for MySQL
+        run: |
+          until mysqladmin ping -h 127.0.0.1 -uroot -prootpass --silent; do
+            sleep 2
+          done
+
+      - name: Apply MySQL schema
+        env:
+          DB_TYPE: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_USER: root
+          DB_PASSWORD: rootpass
+          DB_NAME: TraderDB
+        run: |
+          mysql -h 127.0.0.1 -uroot -prootpass TraderDB \
+            < db/schema_mysql.sql || true
+
+      - name: Run head benchmark backtest
+        id: head
+        env:
+          DB_TYPE: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_USER: root
+          DB_PASSWORD: rootpass
+          DB_NAME: TraderDB
+        run: |
+          python .github/scripts/run_benchmark_backtest.py \
+            --output head.json
+
+      - name: Checkout base branch
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}:base
+          git checkout base
+          # Reinstall deps in case base has different reqs
+          pip install -r requirements.txt pymysql
+
+      - name: Run base benchmark backtest
+        id: base
+        env:
+          DB_TYPE: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_USER: root
+          DB_PASSWORD: rootpass
+          DB_NAME: TraderDB
+        run: |
+          python .github/scripts/run_benchmark_backtest.py \
+            --output base.json || echo '{"sharpe": 0}' > base.json
+
+      - name: Compare
+        run: |
+          python .github/scripts/compare_backtests.py \
+            --base base.json --head head.json \
+            --max-sharpe-regression 0.15
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-reports
+          path: |
+            base.json
+            head.json

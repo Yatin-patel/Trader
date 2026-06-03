@@ -177,9 +177,14 @@ def _init_mysql_database(db_name: str) -> None:
             try:
                 conn.execute(text(statement))
             except Exception as e:
-                # Ignore "table already exists" errors
-                if "already exists" not in str(e).lower():
-                    raise
+                msg = str(e).lower()
+                # Tolerate idempotent re-apply: existing tables/indexes
+                # AND ALTER ADD COLUMN that's already been applied.
+                if ("already exists" in msg
+                        or "duplicate column" in msg
+                        or "duplicate key name" in msg):
+                    continue
+                raise
         conn.commit()
 
 

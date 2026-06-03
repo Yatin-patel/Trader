@@ -565,3 +565,40 @@ ALTER TABLE backtest_runs
     ADD COLUMN from_date DATE NOT NULL DEFAULT '1970-01-01';
 ALTER TABLE wheel_contracts
     ADD COLUMN settings_snapshot LONGTEXT NULL;
+
+-- 36. Tax lots (FIFO accounting)
+CREATE TABLE IF NOT EXISTS tax_lots (
+    lot_id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    project_id          VARCHAR(64) NOT NULL,
+    ticker              VARCHAR(12) NOT NULL,
+    quantity_opened     INT NOT NULL,
+    quantity_remaining  INT NOT NULL,
+    cost_per_share      DECIMAL(18,4) NOT NULL,
+    opened_at           DATETIME(6) NOT NULL,
+    closed_at           DATETIME(6) NULL,
+    source              VARCHAR(32) NOT NULL DEFAULT 'assignment',
+    linked_contract_id  BIGINT NULL,
+    FOREIGN KEY (project_id) REFERENCES trading_projects(project_id)
+        ON DELETE CASCADE,
+    INDEX IX_tax_lots_project_ticker_opened
+        (project_id, ticker, opened_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 37. Tax-lot consumptions (one row per FIFO debit)
+CREATE TABLE IF NOT EXISTS tax_lot_consumptions (
+    consumption_id  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    lot_id          BIGINT NOT NULL,
+    project_id      VARCHAR(64) NOT NULL,
+    ticker          VARCHAR(12) NOT NULL,
+    quantity        INT NOT NULL,
+    sale_price      DECIMAL(18,4) NOT NULL,
+    proceeds        DECIMAL(18,4) NOT NULL,
+    basis           DECIMAL(18,4) NOT NULL,
+    realized_pnl    DECIMAL(18,4) NOT NULL,
+    holding_days    INT NOT NULL,
+    term            VARCHAR(8) NOT NULL,  -- 'short' | 'long'
+    closed_at       DATETIME(6) NOT NULL,
+    reason          VARCHAR(32) NOT NULL,
+    FOREIGN KEY (lot_id) REFERENCES tax_lots(lot_id),
+    INDEX IX_tlc_project_year (project_id, closed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
