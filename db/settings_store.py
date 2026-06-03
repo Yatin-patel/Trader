@@ -93,7 +93,7 @@ class AppSettings:
     def get(key: str, default: Any = None) -> Any:
         with session_scope() as s:
             row = s.execute(
-                text("SELECT setting_value, value_type, is_secret FROM app_settings WHERE setting_key = :k"),
+                text("SELECT setting_value, value_type, is_secret FROM dbo.app_settings WHERE setting_key = :k"),
                 {"k": key},
             ).fetchone()
         if row is None:
@@ -110,25 +110,25 @@ class AppSettings:
             serialized = _encrypt(serialized)
         with session_scope() as s:
             existing = s.execute(
-                text("SELECT setting_key FROM app_settings WHERE setting_key = :k"),
+                text("SELECT setting_key FROM dbo.app_settings WHERE setting_key = :k"),
                 {"k": key},
             ).fetchone()
             if existing:
                 s.execute(
-                    text("""UPDATE app_settings
+                    text("""UPDATE dbo.app_settings
                             SET setting_value = :v,
                                 value_type = COALESCE(:vt, value_type),
                                 category = COALESCE(:c, category),
                                 description = COALESCE(:d, description),
                                 is_secret = :s,
-                                updated_at = UTC_TIMESTAMP()
+                                updated_at = SYSUTCDATETIME()
                             WHERE setting_key = :k"""),
                     {"k": key, "v": serialized, "vt": value_type, "c": category,
                      "d": description, "s": 1 if is_secret else 0},
                 )
             else:
                 s.execute(
-                    text("""INSERT INTO app_settings
+                    text("""INSERT INTO dbo.app_settings
                             (setting_key, setting_value, value_type, category, description, is_secret)
                             VALUES (:k, :v, :vt, :c, :d, :s)"""),
                     {"k": key, "v": serialized, "vt": value_type or "string", "c": category,
@@ -141,7 +141,7 @@ class AppSettings:
         with session_scope() as s:
             rows = s.execute(
                 text("""SELECT setting_key, setting_value, value_type, category, description, is_secret
-                        FROM app_settings ORDER BY category, setting_key""")
+                        FROM dbo.app_settings ORDER BY category, setting_key""")
             ).fetchall()
         out: list[SettingRow] = []
         for r in rows:
@@ -201,22 +201,8 @@ class ProjectSettings:
         "loop_interval_seconds":         (60,      "int",    "Seconds between scan->execute cycles for this project (overrides global)"),
         "order_time_in_force":           ("day",   "string", "Default time-in-force for submitted orders"),
         "use_extended_hours":            (False,   "bool",   "Allow trades during extended hours"),
+        "income_cadence":                ("custom","string", "Income cadence preset: weekly | biweekly | monthly | custom. When set to a preset, the strategist overrides csp_min_dte / csp_max_dte / csp_delta_min / csp_delta_max with the preset values, and auto-roll will roll any open contract whose remaining DTE drifts outside the preset band."),
         "dry_run":                       (True,    "bool",   "If true, skip order submission and only log decisions"),
-        # Day Trading / 0DTE Settings
-        "allow_0dte":                    (False,   "bool",   "Allow 0DTE (same-day expiration) options trades"),
-        "allow_1dte":                    (False,   "bool",   "Allow 1DTE options trades"),
-        "max_0dte_contracts":            (2,       "int",    "Maximum number of 0DTE contracts allowed open at once"),
-        "0dte_profit_target_pct":        (0.30,    "float",  "Profit target for 0DTE trades (30% default - close early)"),
-        "0dte_stop_loss_pct":            (0.50,    "float",  "Stop loss for 0DTE trades (50% of premium)"),
-        "0dte_exit_time_minutes":        (30,      "int",    "Close 0DTE positions this many minutes before market close"),
-        "intraday_scanner_enabled":      (False,   "bool",   "Enable intraday RSI/MACD scanner for day trading signals"),
-        "intraday_rsi_oversold":         (30,      "int",    "RSI level considered oversold for buy signals"),
-        "intraday_rsi_overbought":       (70,      "int",    "RSI level considered overbought for sell signals"),
-        "trailing_stop_enabled":         (False,   "bool",   "Use trailing stop orders for profit protection"),
-        "trailing_stop_pct":             (0.05,    "float",  "Trailing stop percentage from high water mark"),
-        "bracket_orders_enabled":        (False,   "bool",   "Use bracket (OCO) orders with take-profit and stop-loss"),
-        "bracket_take_profit_pct":       (0.50,    "float",  "Take profit percentage for bracket orders"),
-        "bracket_stop_loss_pct":         (0.25,    "float",  "Stop loss percentage for bracket orders"),
     }
 
     @classmethod
@@ -224,7 +210,7 @@ class ProjectSettings:
         with session_scope() as s:
             row = s.execute(
                 text("""SELECT setting_value, value_type
-                        FROM project_settings
+                        FROM dbo.project_settings
                         WHERE project_id = :p AND setting_key = :k"""),
                 {"p": project_id, "k": key},
             ).fetchone()
@@ -242,20 +228,20 @@ class ProjectSettings:
         serialized = _serialize(value, vt)
         with session_scope() as s:
             existing = s.execute(
-                text("""SELECT 1 FROM project_settings
+                text("""SELECT 1 FROM dbo.project_settings
                         WHERE project_id = :p AND setting_key = :k"""),
                 {"p": project_id, "k": key},
             ).fetchone()
             if existing:
                 s.execute(
-                    text("""UPDATE project_settings
-                            SET setting_value = :v, value_type = :vt, updated_at = UTC_TIMESTAMP()
+                    text("""UPDATE dbo.project_settings
+                            SET setting_value = :v, value_type = :vt, updated_at = SYSUTCDATETIME()
                             WHERE project_id = :p AND setting_key = :k"""),
                     {"p": project_id, "k": key, "v": serialized, "vt": vt},
                 )
             else:
                 s.execute(
-                    text("""INSERT INTO project_settings
+                    text("""INSERT INTO dbo.project_settings
                             (project_id, setting_key, setting_value, value_type)
                             VALUES (:p, :k, :v, :vt)"""),
                     {"p": project_id, "k": key, "v": serialized, "vt": vt},
@@ -267,7 +253,7 @@ class ProjectSettings:
         with session_scope() as s:
             rows = s.execute(
                 text("""SELECT setting_key, setting_value, value_type
-                        FROM project_settings WHERE project_id = :p"""),
+                        FROM dbo.project_settings WHERE project_id = :p"""),
                 {"p": project_id},
             ).fetchall()
         overrides = {r[0]: (r[1], r[2]) for r in rows}
@@ -282,3 +268,45 @@ class ProjectSettings:
                 description=desc, is_secret=False,
             ))
         return out
+
+
+
+# ----------------- Cadence presets -----------------------------------------
+# When `income_cadence` is set to a preset (not 'custom'), the strategist
+# uses these values instead of the stored csp_min_dte / csp_max_dte /
+# csp_delta_min / csp_delta_max.
+#
+# delta ranges trade off "how aggressive" vs "how often assigned":
+#   - higher delta => fatter premium but higher assignment probability
+#   - lower delta  => safer but smaller premium per cycle
+CADENCE_PRESETS: dict[str, dict[str, Any]] = {
+    "weekly":   {"min_dte": 5,  "max_dte": 10, "delta_min": 0.20, "delta_max": 0.30},
+    "biweekly": {"min_dte": 12, "max_dte": 18, "delta_min": 0.25, "delta_max": 0.35},
+    "monthly":  {"min_dte": 25, "max_dte": 35, "delta_min": 0.25, "delta_max": 0.40},
+}
+
+
+def effective_csp_band(project_id: str) -> dict[str, Any]:
+    """Return {min_dte, max_dte, delta_min, delta_max, cadence} for CSPs.
+
+    If `income_cadence` is set to a known preset, the preset wins.
+    Otherwise the stored csp_* settings (or their defaults) are returned.
+    """
+    cadence = str(ProjectSettings.get(project_id, "income_cadence",
+                                      default="custom") or "custom").lower()
+    if cadence in CADENCE_PRESETS:
+        p = CADENCE_PRESETS[cadence]
+        return {
+            "min_dte":   int(p["min_dte"]),
+            "max_dte":   int(p["max_dte"]),
+            "delta_min": float(p["delta_min"]),
+            "delta_max": float(p["delta_max"]),
+            "cadence":   cadence,
+        }
+    return {
+        "min_dte":   int(ProjectSettings.get(project_id, "csp_min_dte")),
+        "max_dte":   int(ProjectSettings.get(project_id, "csp_max_dte")),
+        "delta_min": float(ProjectSettings.get(project_id, "csp_delta_min")),
+        "delta_max": float(ProjectSettings.get(project_id, "csp_delta_max")),
+        "cadence":   "custom",
+    }
