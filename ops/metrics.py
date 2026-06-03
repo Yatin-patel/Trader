@@ -38,63 +38,63 @@ def collect_metrics() -> dict[str, Any]:
 
     with session_scope() as s:
         out["events"]["last_5m"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.agent_events WHERE created_at >= :c"
+            "SELECT COUNT(*) FROM agent_events WHERE created_at >= :c"
         ), {"c": cutoff_5m}).fetchone()[0] or 0)
         out["events"]["last_60m"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.agent_events WHERE created_at >= :c"
+            "SELECT COUNT(*) FROM agent_events WHERE created_at >= :c"
         ), {"c": cutoff_60m}).fetchone()[0] or 0)
         out["events"]["errors_last_60m"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.agent_events "
+            "SELECT COUNT(*) FROM agent_events "
             "WHERE event_type = 'ERROR' AND created_at >= :c"
         ), {"c": cutoff_60m}).fetchone()[0] or 0)
 
         out["orders"]["open"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.orders WHERE terminal = 0"
+            "SELECT COUNT(*) FROM orders WHERE terminal = 0"
         )).fetchone()[0] or 0)
         out["orders"]["filled_today"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.orders "
+            "SELECT COUNT(*) FROM orders "
             "WHERE status = 'filled' AND submitted_at >= :c"
         ), {"c": cutoff_day}).fetchone()[0] or 0)
         out["orders"]["rejected_today"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.orders "
+            "SELECT COUNT(*) FROM orders "
             "WHERE status IN ('rejected','canceled','cancelled') "
             "  AND submitted_at >= :c"
         ), {"c": cutoff_day}).fetchone()[0] or 0)
 
         out["contracts"]["open"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.wheel_contracts WHERE is_closed = 0"
+            "SELECT COUNT(*) FROM wheel_contracts WHERE is_closed = 0"
         )).fetchone()[0] or 0)
         out["positions"]["open"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.stock_positions WHERE status = 'OPEN'"
+            "SELECT COUNT(*) FROM stock_positions WHERE status = 'OPEN'"
         )).fetchone()[0] or 0)
 
         out["notifications"]["queued"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.notifications WHERE status = 'queued'"
+            "SELECT COUNT(*) FROM notifications WHERE status = 'queued'"
         )).fetchone()[0] or 0)
         out["notifications"]["sent_today"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.notifications "
+            "SELECT COUNT(*) FROM notifications "
             "WHERE status = 'sent' AND created_at >= :c"
         ), {"c": cutoff_day}).fetchone()[0] or 0)
         out["notifications"]["failed_today"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.notifications "
+            "SELECT COUNT(*) FROM notifications "
             "WHERE status = 'failed' AND created_at >= :c"
         ), {"c": cutoff_day}).fetchone()[0] or 0)
 
         out["kill_switches"]["configured"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.risk_limits WHERE enabled = 1"
+            "SELECT COUNT(*) FROM risk_limits WHERE enabled = 1"
         )).fetchone()[0] or 0)
         out["kill_switches"]["breached_today"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.risk_limits "
+            "SELECT COUNT(*) FROM risk_limits "
             "WHERE last_breached_at >= :c"
         ), {"c": cutoff_day}).fetchone()[0] or 0)
 
         last_backup = s.execute(text("""
-            SELECT TOP 1 status FROM dbo.backup_log ORDER BY backup_id DESC
+            SELECT TOP 1 status FROM backup_log ORDER BY backup_id DESC
         """)).fetchone()
         if last_backup:
             out["backups"]["last_status"] = last_backup[0]
         out["backups"]["completed_today"] = int(s.execute(text(
-            "SELECT COUNT(*) FROM dbo.backup_log "
+            "SELECT COUNT(*) FROM backup_log "
             "WHERE status = 'COMPLETE' AND started_at >= :c"
         ), {"c": cutoff_day}).fetchone()[0] or 0)
     return out

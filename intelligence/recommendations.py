@@ -120,7 +120,7 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
 
     with session_scope() as s:
         row = s.execute(text("""
-            INSERT INTO dbo.ai_recommendations
+            INSERT INTO ai_recommendations
                 (project_id, title, rationale, suggested_changes, status)
             OUTPUT INSERTED.rec_id
             VALUES (:p, :t, :r, :c, 'pending')
@@ -143,7 +143,7 @@ def list_recommendations(project_id: str, *, limit: int = 20,
         rows = s.execute(text(
             f"SELECT TOP (:lim) rec_id, created_at, title, rationale, "
             f"suggested_changes, status, applied_at "
-            f"FROM dbo.ai_recommendations "
+            f"FROM ai_recommendations "
             f"WHERE {' AND '.join(where)} "
             f"ORDER BY rec_id DESC"
         ), params).fetchall()
@@ -168,7 +168,7 @@ def list_recommendations(project_id: str, *, limit: int = 20,
 def apply_recommendation(project_id: str, rec_id: int) -> dict[str, Any]:
     with session_scope() as s:
         row = s.execute(text("""
-            SELECT suggested_changes, status FROM dbo.ai_recommendations
+            SELECT suggested_changes, status FROM ai_recommendations
             WHERE rec_id = :rid AND project_id = :p
         """), {"rid": int(rec_id), "p": project_id}).fetchone()
     if not row:
@@ -190,8 +190,8 @@ def apply_recommendation(project_id: str, rec_id: int) -> dict[str, Any]:
             logger.exception("apply %s failed: %s", k, e)
     with session_scope() as s:
         s.execute(text("""
-            UPDATE dbo.ai_recommendations
-            SET status = 'applied', applied_at = SYSUTCDATETIME()
+            UPDATE ai_recommendations
+            SET status = 'applied', applied_at = UTC_TIMESTAMP()
             WHERE rec_id = :rid
         """), {"rid": int(rec_id)})
         s.commit()

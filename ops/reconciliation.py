@@ -29,7 +29,7 @@ def _record(project_id: str, mismatches: list[dict[str, Any]],
             auto_sync: bool) -> int:
     with session_scope() as s:
         row = s.execute(text("""
-            INSERT INTO dbo.reconciliation_log
+            INSERT INTO reconciliation_log
                 (project_id, mismatches, auto_sync, details)
             OUTPUT INSERTED.recon_id
             VALUES (:p, :n, :as, :d)
@@ -81,8 +81,8 @@ def run_reconciliation(project_id: str, *, auto_sync: bool | None = None) -> dic
             if auto_sync:
                 with session_scope() as s:
                     s.execute(text("""
-                        UPDATE dbo.wheel_contracts
-                        SET is_closed = 1, updated_at = SYSUTCDATETIME()
+                        UPDATE wheel_contracts
+                        SET is_closed = 1, updated_at = UTC_TIMESTAMP()
                         WHERE contract_id = :c
                     """), {"c": c["contract_id"]})
                     s.commit()
@@ -147,7 +147,7 @@ def list_recon_history(project_id: str, limit: int = 20) -> list[dict[str, Any]]
     with session_scope() as s:
         rows = s.execute(text("""
             SELECT TOP (:lim) recon_id, ran_at, mismatches, auto_sync, details
-            FROM dbo.reconciliation_log
+            FROM reconciliation_log
             WHERE project_id = :p
             ORDER BY ran_at DESC
         """), {"p": project_id, "lim": int(limit)}).fetchall()

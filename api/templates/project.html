@@ -125,12 +125,6 @@
             <option value="true" {% if s.value %}selected{% endif %}>true</option>
             <option value="false" {% if not s.value %}selected{% endif %}>false</option>
           </select>
-        {% elif s.key == 'income_cadence' %}
-          <select data-value>
-            {% for opt in ['custom', 'weekly', 'biweekly', 'monthly'] %}
-              <option value="{{ opt }}" {% if s.value == opt %}selected{% endif %}>{{ opt }}</option>
-            {% endfor %}
-          </select>
         {% else %}
           <input type="text" data-value value="{{ s.value }}">
         {% endif %}

@@ -348,7 +348,7 @@ async def signup_submit(request: Request,
         from db.connection import session_scope as _scope
         with _scope() as s:
             s.execute(_sql_text(
-                "UPDATE dbo.trading_projects SET user_id = :u "
+                "UPDATE trading_projects SET user_id = :u "
                 "WHERE user_id IS NULL"
             ), {"u": user.user_id})
             s.commit()
@@ -655,16 +655,16 @@ async def account_set_default_broker(request: Request,
     from db.connection import session_scope as _scope
     with _scope() as s:
         exists = s.execute(_sql(
-            "SELECT 1 FROM dbo.user_preferences WHERE user_id = :u"
+            "SELECT 1 FROM user_preferences WHERE user_id = :u"
         ), {"u": user.user_id}).fetchone()
         if exists:
             s.execute(_sql(
-                "UPDATE dbo.user_preferences SET default_broker = :b, "
-                "updated_at = SYSUTCDATETIME() WHERE user_id = :u"
+                "UPDATE user_preferences SET default_broker = :b, "
+                "updated_at = UTC_TIMESTAMP() WHERE user_id = :u"
             ), {"u": user.user_id, "b": default_broker})
         else:
             s.execute(_sql(
-                "INSERT INTO dbo.user_preferences (user_id, default_broker) "
+                "INSERT INTO user_preferences (user_id, default_broker) "
                 "VALUES (:u, :b)"
             ), {"u": user.user_id, "b": default_broker})
         s.commit()
@@ -676,7 +676,7 @@ def _get_default_broker(user_id: str) -> str:
     from db.connection import session_scope as _scope
     with _scope() as s:
         row = s.execute(_sql(
-            "SELECT default_broker FROM dbo.user_preferences WHERE user_id = :u"
+            "SELECT default_broker FROM user_preferences WHERE user_id = :u"
         ), {"u": user_id}).fetchone()
     return (row[0] if row else "alpaca")
 
@@ -732,13 +732,15 @@ class RiskLimitIn(BaseModel):
 
 
 @app.get("/api/projects/{project_id}/risk/limits")
-async def api_risk_list(project_id: str):
+async def api_risk_list(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from db.risk_repos import RiskLimitsRepo
     return RiskLimitsRepo.list(project_id)
 
 
 @app.post("/api/projects/{project_id}/risk/limits")
-async def api_risk_upsert(project_id: str, payload: RiskLimitIn):
+async def api_risk_upsert(request: Request, project_id: str, payload: RiskLimitIn):
+    _scoped_project(project_id, request)
     from db.risk_repos import RiskLimitsRepo
     try:
         lid = RiskLimitsRepo.upsert(
@@ -753,20 +755,23 @@ async def api_risk_upsert(project_id: str, payload: RiskLimitIn):
 
 
 @app.delete("/api/projects/{project_id}/risk/limits/{limit_id}")
-async def api_risk_delete(project_id: str, limit_id: int):
+async def api_risk_delete(request: Request, project_id: str, limit_id: int):
+    _scoped_project(project_id, request)
     from db.risk_repos import RiskLimitsRepo
     RiskLimitsRepo.delete(project_id, limit_id)
     return {"ok": True}
 
 
 @app.get("/api/projects/{project_id}/risk/greeks")
-async def api_risk_greeks(project_id: str):
+async def api_risk_greeks(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from risk.greeks_agg import aggregate_greeks
     return aggregate_greeks(project_id)
 
 
 @app.get("/api/projects/{project_id}/risk/earnings/{ticker}")
-async def api_risk_earnings(project_id: str, ticker: str):
+async def api_risk_earnings(request: Request, project_id: str, ticker: str):
+    _scoped_project(project_id, request)
     from risk.earnings import get_next_earnings
     nxt = get_next_earnings(ticker)
     return {"ticker": ticker.upper(),
@@ -774,7 +779,8 @@ async def api_risk_earnings(project_id: str, ticker: str):
 
 
 @app.post("/api/projects/{project_id}/risk/evaluate")
-async def api_risk_evaluate(project_id: str):
+async def api_risk_evaluate(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from risk.kill_switch import evaluate_kill_switches
     return {"breaches": evaluate_kill_switches(project_id)}
 
@@ -861,13 +867,15 @@ async def api_close_position(request: Request, project_id: str, position_id: int
 
 
 @app.post("/api/projects/{project_id}/positions/take_profit_now")
-async def api_take_profit_now(project_id: str):
+async def api_take_profit_now(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from risk.take_profit import evaluate_take_profit
     return {"actions": evaluate_take_profit(project_id)}
 
 
 @app.post("/api/projects/{project_id}/positions/auto_roll_now")
-async def api_auto_roll_now(project_id: str):
+async def api_auto_roll_now(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from risk.auto_roll import evaluate_auto_roll
     return {"actions": evaluate_auto_roll(project_id)}
 
@@ -875,14 +883,16 @@ async def api_auto_roll_now(project_id: str):
 # ---------- IV rank + news -------------------------------------------------
 
 @app.get("/api/projects/{project_id}/iv_rank/{ticker}")
-async def api_iv_rank(project_id: str, ticker: str):
+async def api_iv_rank(request: Request, project_id: str, ticker: str):
+    _scoped_project(project_id, request)
     from analytics.iv_rank import get_iv_rank
     return {"ticker": ticker.upper(),
             "iv_rank": get_iv_rank(project_id, ticker)}
 
 
 @app.get("/api/projects/{project_id}/news/{ticker}")
-async def api_news(project_id: str, ticker: str):
+async def api_news(request: Request, project_id: str, ticker: str):
+    _scoped_project(project_id, request)
     from risk.news import get_news_sentiment
     return get_news_sentiment(ticker)
 
@@ -897,7 +907,8 @@ class BacktestIn(BaseModel):
 
 
 @app.post("/api/projects/{project_id}/backtest/run")
-async def api_backtest_run(project_id: str, payload: BacktestIn):
+async def api_backtest_run(request: Request, project_id: str, payload: BacktestIn):
+    _scoped_project(project_id, request)
     from datetime import date as _date
     from backtest import run_backtest
     try:
@@ -919,13 +930,15 @@ async def api_backtest_run(project_id: str, payload: BacktestIn):
 
 
 @app.get("/api/projects/{project_id}/backtest/runs")
-async def api_backtest_list(project_id: str, limit: int = 25):
+async def api_backtest_list(request: Request, project_id: str, limit: int = 25):
+    _scoped_project(project_id, request)
     from backtest import list_runs
     return list_runs(project_id, limit=limit)
 
 
 @app.get("/api/projects/{project_id}/backtest/runs/{run_id}")
-async def api_backtest_get(project_id: str, run_id: int):
+async def api_backtest_get(request: Request, project_id: str, run_id: int):
+    _scoped_project(project_id, request)
     from backtest import get_run
     r = get_run(project_id, run_id)
     if r is None:
@@ -970,7 +983,8 @@ class TestSendIn(BaseModel):
 
 
 @app.get("/api/projects/{project_id}/notifications/channels")
-async def api_channels_list(project_id: str):
+async def api_channels_list(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from db.notifications_repo import ChannelsRepo
     rows = ChannelsRepo.list(project_id)
     # Mask the target for email/discord/slack so we don't leak credentials.
@@ -984,7 +998,8 @@ async def api_channels_list(project_id: str):
 
 
 @app.post("/api/projects/{project_id}/notifications/channels")
-async def api_channels_upsert(project_id: str, payload: ChannelIn):
+async def api_channels_upsert(request: Request, project_id: str, payload: ChannelIn):
+    _scoped_project(project_id, request)
     from db.notifications_repo import ChannelsRepo
     try:
         cid = ChannelsRepo.upsert(
@@ -999,15 +1014,17 @@ async def api_channels_upsert(project_id: str, payload: ChannelIn):
 
 
 @app.delete("/api/projects/{project_id}/notifications/channels/{channel_id}")
-async def api_channels_delete(project_id: str, channel_id: int):
+async def api_channels_delete(request: Request, project_id: str, channel_id: int):
+    _scoped_project(project_id, request)
     from db.notifications_repo import ChannelsRepo
     ChannelsRepo.delete(project_id, channel_id)
     return {"ok": True}
 
 
 @app.post("/api/projects/{project_id}/notifications/test")
-async def api_channels_test(project_id: str, payload: TestSendIn):
+async def api_channels_test(request: Request, project_id: str, payload: TestSendIn):
     """Send a test notification through one specific channel."""
+    _scoped_project(project_id, request)
     from db.notifications_repo import ChannelsRepo, NotificationsRepo
     from notifications.adapters import ADAPTERS
     channels = {c["channel_id"]: c for c in ChannelsRepo.list(project_id)}
@@ -1032,15 +1049,17 @@ async def api_channels_test(project_id: str, payload: TestSendIn):
 
 
 @app.get("/api/projects/{project_id}/notifications")
-async def api_notifications_list(project_id: str, limit: int = 50,
+async def api_notifications_list(request: Request, project_id: str, limit: int = 50,
                                  unread_only: bool = False):
+    _scoped_project(project_id, request)
     from db.notifications_repo import NotificationsRepo
     return NotificationsRepo.list(project_id, limit=limit,
                                   unread_only=unread_only)
 
 
 @app.get("/api/projects/{project_id}/notifications/unread_count")
-async def api_notifications_unread(project_id: str):
+async def api_notifications_unread(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from db.notifications_repo import NotificationsRepo
     return {"unread": NotificationsRepo.unread_count(project_id)}
 
@@ -1051,7 +1070,8 @@ class MarkReadIn(BaseModel):
 
 
 @app.post("/api/projects/{project_id}/notifications/mark_read")
-async def api_notifications_mark_read(project_id: str, payload: MarkReadIn):
+async def api_notifications_mark_read(request: Request, project_id: str, payload: MarkReadIn):
+    _scoped_project(project_id, request)
     from db.notifications_repo import NotificationsRepo
     n = NotificationsRepo.mark_read(project_id, ids=payload.ids,
                                     all_unread=payload.all_unread)
@@ -1059,7 +1079,8 @@ async def api_notifications_mark_read(project_id: str, payload: MarkReadIn):
 
 
 @app.post("/api/projects/{project_id}/notifications/digest_now")
-async def api_digest_now(project_id: str):
+async def api_digest_now(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from notifications.digest import send_daily_digest
     return {"results": send_daily_digest(project_id)}
 
@@ -1067,14 +1088,16 @@ async def api_digest_now(project_id: str):
 # ---------- Wheel cycles ---------------------------------------------------
 
 @app.get("/api/projects/{project_id}/cycles")
-async def api_cycles_list(project_id: str, status: str | None = None,
+async def api_cycles_list(request: Request, project_id: str, status: str | None = None,
                           limit: int = 50):
+    _scoped_project(project_id, request)
     from analytics.wheel_cycles import list_cycles
     return list_cycles(project_id, status=status, limit=limit)
 
 
 @app.get("/api/projects/{project_id}/cycles/{cycle_id}")
-async def api_cycle_detail(project_id: str, cycle_id: int):
+async def api_cycle_detail(request: Request, project_id: str, cycle_id: int):
+    _scoped_project(project_id, request)
     from analytics.wheel_cycles import get_cycle
     c = get_cycle(project_id, cycle_id)
     if c is None:
@@ -1085,26 +1108,30 @@ async def api_cycle_detail(project_id: str, cycle_id: int):
 # ---------- Reliability (orders + reconciliation + backups + metrics) -----
 
 @app.get("/api/projects/{project_id}/orders")
-async def api_orders_list(project_id: str, limit: int = 100,
+async def api_orders_list(request: Request, project_id: str, limit: int = 100,
                           terminal: bool | None = None):
+    _scoped_project(project_id, request)
     from ops.orders_tracker import list_orders
     return list_orders(project_id, limit=limit, terminal=terminal)
 
 
 @app.post("/api/projects/{project_id}/orders/poll")
-async def api_orders_poll(project_id: str):
+async def api_orders_poll(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from ops.orders_tracker import poll_orders
     return await asyncio.to_thread(poll_orders, project_id)
 
 
 @app.get("/api/projects/{project_id}/reconciliation/history")
-async def api_recon_history(project_id: str, limit: int = 20):
+async def api_recon_history(request: Request, project_id: str, limit: int = 20):
+    _scoped_project(project_id, request)
     from ops.reconciliation import list_recon_history
     return list_recon_history(project_id, limit=limit)
 
 
 @app.post("/api/projects/{project_id}/reconciliation/run")
-async def api_recon_run(project_id: str, auto_sync: bool = False):
+async def api_recon_run(request: Request, project_id: str, auto_sync: bool = False):
+    _scoped_project(project_id, request)
     from ops.reconciliation import run_reconciliation
     return await asyncio.to_thread(run_reconciliation, project_id,
                                    auto_sync=auto_sync)
@@ -1160,20 +1187,23 @@ async def api_llm_cache_stats():
 # ---------- AI recommendations (Cat 10.1) --------------------------------
 
 @app.post("/api/projects/{project_id}/recommendations/build")
-async def api_recs_build(project_id: str):
+async def api_recs_build(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from intelligence.recommendations import build_recommendations
     return await asyncio.to_thread(build_recommendations, project_id)
 
 
 @app.get("/api/projects/{project_id}/recommendations")
-async def api_recs_list(project_id: str, status: str | None = None,
+async def api_recs_list(request: Request, project_id: str, status: str | None = None,
                         limit: int = 20):
+    _scoped_project(project_id, request)
     from intelligence.recommendations import list_recommendations
     return list_recommendations(project_id, status=status, limit=limit)
 
 
 @app.post("/api/projects/{project_id}/recommendations/{rec_id}/apply")
-async def api_recs_apply(project_id: str, rec_id: int):
+async def api_recs_apply(request: Request, project_id: str, rec_id: int):
+    _scoped_project(project_id, request)
     from intelligence.recommendations import apply_recommendation
     return apply_recommendation(project_id, rec_id)
 
@@ -1181,13 +1211,15 @@ async def api_recs_apply(project_id: str, rec_id: int):
 # ---------- Anomalies (Cat 10.3) -----------------------------------------
 
 @app.post("/api/projects/{project_id}/anomalies/detect")
-async def api_anom_detect(project_id: str):
+async def api_anom_detect(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from intelligence.anomalies import detect_anomalies
     return {"anomalies": await asyncio.to_thread(detect_anomalies, project_id)}
 
 
 @app.get("/api/projects/{project_id}/anomalies")
-async def api_anom_list(project_id: str, limit: int = 50):
+async def api_anom_list(request: Request, project_id: str, limit: int = 50):
+    _scoped_project(project_id, request)
     from intelligence.anomalies import list_anomalies
     return list_anomalies(project_id, limit=limit)
 
@@ -1201,7 +1233,8 @@ async def api_templates_list():
 
 
 @app.post("/api/projects/{project_id}/strategy_templates/{tid}/apply")
-async def api_template_apply(project_id: str, tid: str):
+async def api_template_apply(request: Request, project_id: str, tid: str):
+    _scoped_project(project_id, request)
     from intelligence.strategy_templates import apply_template
     out = apply_template(project_id, tid)
     if "error" in out:
@@ -1220,13 +1253,15 @@ async def outlook_page(request: Request, project_id: str):
 
 
 @app.get("/api/projects/{project_id}/outlook/top_performers")
-async def api_outlook_top(project_id: str, limit: int = 25):
+async def api_outlook_top(request: Request, project_id: str, limit: int = 25):
+    _scoped_project(project_id, request)
     from intelligence.market_outlook import top_performers
     return await asyncio.to_thread(top_performers, project_id, limit=limit)
 
 
 @app.get("/api/projects/{project_id}/outlook/predict/{ticker}")
-async def api_outlook_predict(project_id: str, ticker: str, force: bool = False):
+async def api_outlook_predict(request: Request, project_id: str, ticker: str, force: bool = False):
+    _scoped_project(project_id, request)
     from intelligence.market_outlook import predict
     out = await asyncio.to_thread(predict, project_id, ticker, force=force)
     if "error" in out:
@@ -1324,8 +1359,9 @@ async def api_dashboard_overview(request: Request, project_id: str):
 
 
 @app.get("/api/projects/{project_id}/optimize/preview")
-async def api_optimize_preview(project_id: str, strategy: str):
+async def api_optimize_preview(request: Request, project_id: str, strategy: str):
     """Preview what settings the Optimize button would apply."""
+    _scoped_project(project_id, request)
     from intelligence.optimizer import preview
     out = await asyncio.to_thread(preview, project_id, strategy)
     if "error" in out:
@@ -1334,8 +1370,9 @@ async def api_optimize_preview(project_id: str, strategy: str):
 
 
 @app.post("/api/projects/{project_id}/optimize")
-async def api_optimize_apply(project_id: str, body: dict):
+async def api_optimize_apply(request: Request, project_id: str, body: dict):
     """Apply the cash-tier-aware optimized settings for the given strategy."""
+    _scoped_project(project_id, request)
     strategy = (body or {}).get("strategy")
     if not strategy:
         raise HTTPException(400, "strategy required in body")
@@ -1379,7 +1416,8 @@ async def api_close_alpaca_position(request: Request, project_id: str, body: dic
 # ---------- Trade journal export (Cat 11.1) ------------------------------
 
 @app.get("/api/projects/{project_id}/journal/export.csv")
-async def api_journal_csv(project_id: str, since_days: int | None = None):
+async def api_journal_csv(request: Request, project_id: str, since_days: int | None = None):
+    _scoped_project(project_id, request)
     from datetime import datetime, timedelta, timezone
     from fastapi.responses import Response
     from exports.journal import trade_journal_csv
@@ -1794,31 +1832,35 @@ async def api_delete_project(request: Request, project_id: str):
 # ---------- REST: per-project settings ---------------------------------------
 
 @app.get("/api/projects/{project_id}/settings")
-async def api_list_project_settings(project_id: str):
+async def api_list_project_settings(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     rows = ProjectSettings.list_for_project(project_id)
     return [{"key": r.key, "value": r.value, "value_type": r.value_type,
              "description": r.description} for r in rows]
 
 
 @app.post("/api/projects/{project_id}/settings")
-async def api_set_project_setting(project_id: str, payload: ProjectSettingIn):
+async def api_set_project_setting(request: Request, project_id: str, payload: ProjectSettingIn):
+    _scoped_project(project_id, request)
     ProjectSettings.set(project_id, payload.key, payload.value, value_type=payload.value_type)
     return {"ok": True}
 
 
 @app.get("/api/projects/{project_id}/events")
-async def api_project_events(project_id: str, limit: int = 50):
+async def api_project_events(request: Request, project_id: str, limit: int = 50):
+    _scoped_project(project_id, request)
     return EventsRepo.recent(project_id, limit=limit)
 
 
 @app.get("/api/projects/{project_id}/logs")
-async def api_project_logs(project_id: str,
+async def api_project_logs(request: Request, project_id: str,
                            node: str | None = None,
                            event_type: str | None = None,
                            search: str | None = None,
                            limit: int = 100,
                            before_id: int | None = None,
                            humanize: bool = True):
+    _scoped_project(project_id, request)
     raw = EventsRepo.query(project_id, node=node or None,
                            event_type=event_type or None,
                            search=search or None,
@@ -1861,7 +1903,8 @@ async def help_page(request: Request):
 
 
 @app.get("/api/projects/{project_id}/positions")
-async def api_project_positions(project_id: str):
+async def api_project_positions(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     return PositionsRepo.list_open(project_id)
 
 
@@ -1884,34 +1927,39 @@ async def api_reset_paper(request: Request, project_id: str, cash: float = 10000
 
 
 @app.get("/api/projects/{project_id}/contracts")
-async def api_project_contracts(project_id: str):
+async def api_project_contracts(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     return WheelRepo.list_open(project_id)
 
 
 # ---------- REST: analytics --------------------------------------------------
 
 @app.get("/api/projects/{project_id}/performance/summary")
-async def api_performance_summary(project_id: str, period: str = "all"):
+async def api_performance_summary(request: Request, project_id: str, period: str = "all"):
+    _scoped_project(project_id, request)
     from analytics.pnl_calculator import metrics_summary
     return metrics_summary(project_id, period=period)
 
 
 @app.get("/api/projects/{project_id}/performance/equity_curve")
-async def api_equity_curve(project_id: str, period: str = "month"):
+async def api_equity_curve(request: Request, project_id: str, period: str = "month"):
+    _scoped_project(project_id, request)
     from analytics.pnl_calculator import equity_curve_points
     return equity_curve_points(project_id, period=period)
 
 
 @app.get("/api/projects/{project_id}/performance/closed_trades")
-async def api_closed_trades(project_id: str, ticker: str | None = None,
+async def api_closed_trades(request: Request, project_id: str, ticker: str | None = None,
                             limit: int = 100):
+    _scoped_project(project_id, request)
     from db.analytics_repos import ClosedContractsRepo
     return ClosedContractsRepo.list(project_id, ticker=ticker, limit=limit)
 
 
 @app.get("/api/projects/{project_id}/performance/by_ticker")
-async def api_perf_by_ticker(project_id: str, since_days: int = 90,
+async def api_perf_by_ticker(request: Request, project_id: str, since_days: int = 90,
                              min_trades: int = 1):
+    _scoped_project(project_id, request)
     from datetime import datetime, timedelta, timezone
     from db.analytics_repos import ClosedContractsRepo
     since = datetime.now(tz=timezone.utc) - timedelta(days=since_days)
@@ -1920,8 +1968,9 @@ async def api_perf_by_ticker(project_id: str, since_days: int = 90,
 
 
 @app.get("/api/projects/{project_id}/performance/attribution")
-async def api_attribution(project_id: str, dimension: str = "delta",
+async def api_attribution(request: Request, project_id: str, dimension: str = "delta",
                           since_days: int = 365, min_trades: int = 1):
+    _scoped_project(project_id, request)
     from analytics.attribution import attribution_by_dimension
     return attribution_by_dimension(project_id, dimension=dimension,
                                     since_days=since_days,
@@ -1929,14 +1978,16 @@ async def api_attribution(project_id: str, dimension: str = "delta",
 
 
 @app.post("/api/projects/{project_id}/performance/snapshot")
-async def api_take_snapshot_now(project_id: str):
+async def api_take_snapshot_now(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from analytics.snapshotter import take_snapshot
     sid = take_snapshot(project_id)
     return {"ok": sid is not None, "snapshot_id": sid}
 
 
 @app.post("/api/projects/{project_id}/performance/detect_closures")
-async def api_detect_now(project_id: str):
+async def api_detect_now(request: Request, project_id: str):
+    _scoped_project(project_id, request)
     from analytics.closure_detector import detect_closures
     return detect_closures(project_id)
 

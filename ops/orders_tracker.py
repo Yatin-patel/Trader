@@ -30,12 +30,12 @@ def record_submission(project_id: str, *, alpaca_order_id: str,
     is_term = status.lower() in _TERMINAL
     with session_scope() as s:
         existing = s.execute(text("""
-            SELECT order_id FROM dbo.orders WHERE alpaca_order_id = :a
+            SELECT order_id FROM orders WHERE alpaca_order_id = :a
         """), {"a": alpaca_order_id}).fetchone()
         if existing:
             return int(existing[0])
         row = s.execute(text("""
-            INSERT INTO dbo.orders
+            INSERT INTO orders
                 (project_id, alpaca_order_id, symbol, side, order_type,
                  qty, limit_price, status, terminal, related_contract_id)
             OUTPUT INSERTED.order_id
@@ -56,7 +56,7 @@ def poll_orders(project_id: str) -> dict[str, Any]:
     with session_scope() as s:
         rows = s.execute(text("""
             SELECT order_id, alpaca_order_id
-            FROM dbo.orders
+            FROM orders
             WHERE project_id = :p AND terminal = 0
         """), {"p": project_id}).fetchall()
     if not rows:
@@ -75,10 +75,10 @@ def poll_orders(project_id: str) -> dict[str, Any]:
             is_term = status in _TERMINAL
             with session_scope() as s:
                 s.execute(text("""
-                    UPDATE dbo.orders
+                    UPDATE orders
                     SET status = :st, filled_qty = :fq,
                         filled_avg_price = :avg,
-                        last_polled_at = SYSUTCDATETIME(),
+                        last_polled_at = UTC_TIMESTAMP(),
                         terminal = :t
                     WHERE order_id = :oid
                 """), {"st": status, "fq": filled_qty, "avg": avg,
@@ -89,8 +89,8 @@ def poll_orders(project_id: str) -> dict[str, Any]:
             errors.append(f"{alpaca_id}: {e}")
             with session_scope() as s:
                 s.execute(text("""
-                    UPDATE dbo.orders
-                    SET last_polled_at = SYSUTCDATETIME(),
+                    UPDATE orders
+                    SET last_polled_at = UTC_TIMESTAMP(),
                         last_error = :err
                     WHERE order_id = :oid
                 """), {"err": str(e)[:500], "oid": order_id})
@@ -110,7 +110,7 @@ def list_orders(project_id: str, *, limit: int = 100,
         " order_type, qty, limit_price, status, filled_qty,"
         " filled_avg_price, submitted_at, last_polled_at, terminal,"
         " last_error "
-        "FROM dbo.orders "
+        "FROM orders "
         f"WHERE {' AND '.join(where)} "
         "ORDER BY order_id DESC"
     )

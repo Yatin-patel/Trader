@@ -212,54 +212,22 @@ else
 fi
 
 # ---------- 3. Microsoft ODBC Driver 18 for SQL Server ----------------------
-# Production-safe: detect any pre-existing Microsoft apt repo on the box
-# (Microsoft's docs install the key to /usr/share/keyrings/microsoft-prod.gpg;
-# Azure CLI installs to /etc/apt/keyrings/microsoft.gpg; some Ansible roles
-# put it elsewhere). We never write a duplicate source list — that triggers
-# apt's "Conflicting values for option Signed-By" error.
 log " 3/16" "Microsoft ODBC Driver 18 for SQL Server"
 if dpkg -s msodbcsql18 >/dev/null 2>&1; then
     skip "msodbcsql18 already installed"
 else
-    EXISTING_MS_SRC=""
-    if [[ -d /etc/apt/sources.list.d ]]; then
-        EXISTING_MS_SRC=$(grep -rlF 'packages.microsoft.com' \
-            /etc/apt/sources.list.d /etc/apt/sources.list 2>/dev/null | head -1 || true)
-    fi
-    if [[ -n "$EXISTING_MS_SRC" ]]; then
-        skip "Microsoft apt repo already configured at $EXISTING_MS_SRC"
-        do_ "using existing repo, just installing msodbcsql18"
-        maybe_run apt-get update -qq
-        if (( CHECK_ONLY == 0 )); then
-            ACCEPT_EULA=Y DEBIAN_FRONTEND=noninteractive \
-                apt-get install -y msodbcsql18
-            ok "msodbcsql18 installed via existing repo"
-        fi
-    else
-        do_ "adding Microsoft apt repo"
-        install -d -m 0755 /etc/apt/keyrings
-        # Skip the dearmor if the target file already exists (avoid the
-        # interactive y/N prompt that wrote 'odbc.gpg' in your cwd).
-        if [[ -f /etc/apt/keyrings/microsoft.gpg ]]; then
-            skip "/etc/apt/keyrings/microsoft.gpg already exists"
-        else
-            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | \
-                gpg --dearmor --yes -o /etc/apt/keyrings/microsoft.gpg
-            chmod 0644 /etc/apt/keyrings/microsoft.gpg
-            ok "GPG key written to /etc/apt/keyrings/microsoft.gpg"
-        fi
+    do_ "adding Microsoft apt repo"
+    install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | \
+        gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
+    chmod 0644 /etc/apt/keyrings/microsoft.gpg
 
-        cat >/etc/apt/sources.list.d/mssql-release.list <<EOF
+    cat >/etc/apt/sources.list.d/mssql-release.list <<EOF
 deb [signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/${UBUNTU_REL}/prod ${UBUNTU_CODENAME} main
 EOF
-        ok "wrote /etc/apt/sources.list.d/mssql-release.list"
-        maybe_run apt-get update -qq
-        if (( CHECK_ONLY == 0 )); then
-            ACCEPT_EULA=Y DEBIAN_FRONTEND=noninteractive \
-                apt-get install -y msodbcsql18
-            ok "msodbcsql18 installed"
-        fi
-    fi
+    apt-get update -qq
+    ACCEPT_EULA=Y DEBIAN_FRONTEND=noninteractive apt-get install -y msodbcsql18
+    ok "msodbcsql18 installed"
 fi
 
 # ---------- 4. Python 3.10+ + venv ------------------------------------------

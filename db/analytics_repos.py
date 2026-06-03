@@ -34,7 +34,7 @@ class ClosedContractsRepo:
         snapshot_text = json.dumps(settings_snapshot, default=str) if settings_snapshot else None
         with session_scope() as s:
             row = s.execute(text("""
-                INSERT INTO dbo.closed_contracts
+                INSERT INTO closed_contracts
                     (contract_id, project_id, ticker, option_symbol, strategy_phase,
                      opened_at, closed_at, days_held, strike_price, quantity,
                      premium_collected, close_cost, realized_pnl, closure_reason,
@@ -72,7 +72,7 @@ class ClosedContractsRepo:
             " quantity, premium_collected, close_cost, realized_pnl,"
             " closure_reason, delta_at_entry, dte_at_entry,"
             " underlying_at_entry, underlying_at_close, settings_snapshot "
-            "FROM dbo.closed_contracts "
+            "FROM closed_contracts "
             f"WHERE {' AND '.join(where)} "
             "ORDER BY closed_at DESC"
         )
@@ -103,7 +103,7 @@ class ClosedContractsRepo:
     def realized_pnl_since(project_id: str, since: datetime) -> float:
         with session_scope() as s:
             row = s.execute(text("""
-                SELECT ISNULL(SUM(realized_pnl), 0) FROM dbo.closed_contracts
+                SELECT ISNULL(SUM(realized_pnl), 0) FROM closed_contracts
                 WHERE project_id = :p AND closed_at >= :since
             """), {"p": project_id, "since": since}).fetchone()
         return float(row[0] or 0)
@@ -125,7 +125,7 @@ class ClosedContractsRepo:
             " SUM(premium_collected) AS total_premium,"
             " MAX(realized_pnl) AS biggest_win,"
             " MIN(realized_pnl) AS biggest_loss "
-            "FROM dbo.closed_contracts "
+            "FROM closed_contracts "
             f"WHERE {' AND '.join(where)} "
             "GROUP BY ticker "
             "HAVING COUNT(*) >= :mt "
@@ -157,7 +157,7 @@ class ClosedPositionsRepo:
         realized_pnl = (float(exit_price) - float(entry_price)) * quantity
         with session_scope() as s:
             row = s.execute(text("""
-                INSERT INTO dbo.closed_positions
+                INSERT INTO closed_positions
                     (position_id, project_id, ticker, quantity, entry_price,
                      exit_price, opened_at, closed_at, days_held, realized_pnl,
                      closure_reason, associated_contract_id)
@@ -177,7 +177,7 @@ class ClosedPositionsRepo:
     def realized_pnl_since(project_id: str, since: datetime) -> float:
         with session_scope() as s:
             row = s.execute(text("""
-                SELECT ISNULL(SUM(realized_pnl), 0) FROM dbo.closed_positions
+                SELECT ISNULL(SUM(realized_pnl), 0) FROM closed_positions
                 WHERE project_id = :p AND closed_at >= :since
             """), {"p": project_id, "since": since}).fetchone()
         return float(row[0] or 0)
@@ -192,7 +192,7 @@ class PortfolioSnapshotsRepo:
                unrealized_pnl: float | None = None) -> int:
         with session_scope() as s:
             row = s.execute(text("""
-                INSERT INTO dbo.portfolio_snapshots
+                INSERT INTO portfolio_snapshots
                     (project_id, cash, buying_power, equity, long_market_value,
                      short_market_value, realized_pnl_day, unrealized_pnl)
                 OUTPUT INSERTED.snapshot_id
@@ -212,7 +212,7 @@ class PortfolioSnapshotsRepo:
             rows = s.execute(text("""
                 SELECT snapshot_at, cash, buying_power, equity,
                        realized_pnl_day, unrealized_pnl
-                FROM dbo.portfolio_snapshots
+                FROM portfolio_snapshots
                 WHERE project_id = :p AND snapshot_at >= :since
                 ORDER BY snapshot_at ASC
             """), {"p": project_id, "since": since}).fetchall()
@@ -235,7 +235,7 @@ class PortfolioSnapshotsRepo:
             row = s.execute(text("""
                 SELECT TOP 1 snapshot_at, cash, buying_power, equity,
                        realized_pnl_day, unrealized_pnl
-                FROM dbo.portfolio_snapshots
+                FROM portfolio_snapshots
                 WHERE project_id = :p
                 ORDER BY snapshot_at DESC
             """), {"p": project_id}).fetchone()
@@ -256,7 +256,7 @@ class PortfolioSnapshotsRepo:
         with session_scope() as s:
             row = s.execute(text("""
                 SELECT TOP 1 snapshot_at, cash, buying_power, equity
-                FROM dbo.portfolio_snapshots
+                FROM portfolio_snapshots
                 WHERE project_id = :p
                 ORDER BY snapshot_at ASC
             """), {"p": project_id}).fetchone()
@@ -278,7 +278,7 @@ class PortfolioSnapshotsRepo:
         with session_scope() as s:
             row = s.execute(text("""
                 SELECT TOP 1 snapshot_at, equity
-                FROM dbo.portfolio_snapshots
+                FROM portfolio_snapshots
                 WHERE project_id = :p AND snapshot_at >= :w
                 ORDER BY snapshot_at ASC
             """), {"p": project_id, "w": when}).fetchone()

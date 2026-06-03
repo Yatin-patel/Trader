@@ -19,6 +19,40 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _suppress_windows_asyncio_errors() -> None:
+    """Suppress spurious ConnectionResetError on Windows asyncio.
+
+    Windows ProactorEventLoop raises ConnectionResetError when a client
+    disconnects abruptly. These are benign and fill the logs with noise.
+    """
+    if sys.platform != 'win32':
+        return
+
+    _original_exception_handler = None
+
+    def _exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+        exception = context.get('exception')
+        # Suppress ConnectionResetError (benign on Windows)
+        if isinstance(exception, ConnectionResetError):
+            return
+        # Suppress OSError with errno 995 (operation aborted)
+        if isinstance(exception, OSError) and getattr(exception, 'winerror', None) == 995:
+            return
+        # Fall back to original handler or default
+        if _original_exception_handler:
+            _original_exception_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    try:
+        loop = asyncio.get_event_loop()
+        _original_exception_handler = loop.get_exception_handler()
+        loop.set_exception_handler(_exception_handler)
+    except RuntimeError:
+        # No event loop yet; will be set up later
+        pass
+
+
 def _setup_logging() -> None:
     from db.settings_store import AppSettings
     try:
@@ -44,6 +78,7 @@ def cmd_runner() -> int:
 
     init_database()
     _setup_logging()
+    _suppress_windows_asyncio_errors()
     runner = MultiTenantRunner()
     try:
         asyncio.run(runner.run_forever())
@@ -56,6 +91,7 @@ def cmd_api(autorun: bool) -> int:
     import uvicorn
     from api.main import app
 
+    _suppress_windows_asyncio_errors()
     app.state.autorun = autorun
     host = os.getenv("API_HOST", "127.0.0.1")
     port = int(os.getenv("API_PORT", "8000"))

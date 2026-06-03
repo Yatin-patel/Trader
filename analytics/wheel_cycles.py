@@ -32,7 +32,7 @@ def get_open_cycle(project_id: str, ticker: str) -> dict[str, Any] | None:
             SELECT TOP 1 cycle_id, status, started_at, total_premium,
                          realized_pnl, csp_count, cc_count, assignment_count,
                          cost_basis_adjusted
-            FROM dbo.wheel_cycles
+            FROM wheel_cycles
             WHERE project_id = :p AND ticker = :t AND status = 'OPEN'
             ORDER BY started_at DESC
         """), {"p": project_id, "t": ticker}).fetchone()
@@ -54,7 +54,7 @@ def open_cycle(project_id: str, ticker: str) -> int:
         return existing["cycle_id"]
     with session_scope() as s:
         row = s.execute(text("""
-            INSERT INTO dbo.wheel_cycles (project_id, ticker, status)
+            INSERT INTO wheel_cycles (project_id, ticker, status)
             OUTPUT INSERTED.cycle_id
             VALUES (:p, :t, 'OPEN')
         """), {"p": project_id, "t": ticker}).fetchone()
@@ -67,13 +67,13 @@ def record_csp_sold(project_id: str, ticker: str, contract_id: int,
     cid = open_cycle(project_id, ticker)
     with session_scope() as s:
         s.execute(text("""
-            UPDATE dbo.wheel_cycles
+            UPDATE wheel_cycles
             SET csp_count = csp_count + 1,
                 total_premium = total_premium + :p
             WHERE cycle_id = :cid
         """), {"cid": cid, "p": float(premium_dollars)})
         s.execute(text("""
-            UPDATE dbo.wheel_contracts SET cycle_id = :cid
+            UPDATE wheel_contracts SET cycle_id = :cid
             WHERE contract_id = :con
         """), {"cid": cid, "con": int(contract_id)})
         s.commit()
@@ -87,13 +87,13 @@ def record_cc_sold(project_id: str, ticker: str, contract_id: int,
     cid = open_cycle(project_id, ticker)
     with session_scope() as s:
         s.execute(text("""
-            UPDATE dbo.wheel_cycles
+            UPDATE wheel_cycles
             SET cc_count = cc_count + 1,
                 total_premium = total_premium + :p
             WHERE cycle_id = :cid
         """), {"cid": cid, "p": float(premium_dollars)})
         s.execute(text("""
-            UPDATE dbo.wheel_contracts SET cycle_id = :cid
+            UPDATE wheel_contracts SET cycle_id = :cid
             WHERE contract_id = :con
         """), {"cid": cid, "con": int(contract_id)})
         s.commit()
@@ -116,7 +116,7 @@ def record_assignment(project_id: str, ticker: str, strike: float,
     adjusted = float(strike) - (total_prem / shares)
     with session_scope() as s:
         s.execute(text("""
-            UPDATE dbo.wheel_cycles
+            UPDATE wheel_cycles
             SET assignment_count = assignment_count + 1,
                 total_premium = :tp,
                 cost_basis_adjusted = :cba
@@ -132,7 +132,7 @@ def record_pnl(project_id: str, ticker: str, pnl_dollars: float) -> None:
         return
     with session_scope() as s:
         s.execute(text("""
-            UPDATE dbo.wheel_cycles
+            UPDATE wheel_cycles
             SET realized_pnl = realized_pnl + :p
             WHERE cycle_id = :cid
         """), {"cid": cycle["cycle_id"], "p": float(pnl_dollars)})
@@ -146,9 +146,9 @@ def close_cycle(project_id: str, ticker: str, *, outcome: str,
         return
     with session_scope() as s:
         s.execute(text("""
-            UPDATE dbo.wheel_cycles
+            UPDATE wheel_cycles
             SET status = 'CLOSED',
-                ended_at = SYSUTCDATETIME(),
+                ended_at = UTC_TIMESTAMP(),
                 final_outcome = :fo,
                 final_exit_price = :fep
             WHERE cycle_id = :cid
@@ -169,7 +169,7 @@ def list_cycles(project_id: str, *, status: str | None = None,
         " total_premium, realized_pnl, csp_count, cc_count,"
         " assignment_count, cost_basis_adjusted, final_outcome,"
         " final_exit_price "
-        "FROM dbo.wheel_cycles "
+        "FROM wheel_cycles "
         f"WHERE {' AND '.join(where)} "
         "ORDER BY started_at DESC"
     )
@@ -212,7 +212,7 @@ def get_cycle(project_id: str, cycle_id: int) -> dict[str, Any] | None:
                    total_premium, realized_pnl, csp_count, cc_count,
                    assignment_count, cost_basis_adjusted, final_outcome,
                    final_exit_price
-            FROM dbo.wheel_cycles
+            FROM wheel_cycles
             WHERE cycle_id = :cid AND project_id = :p
         """), {"cid": int(cycle_id), "p": project_id}).fetchone()
         if not row:
@@ -222,7 +222,7 @@ def get_cycle(project_id: str, cycle_id: int) -> dict[str, Any] | None:
             SELECT contract_id, ticker, strategy_phase, option_symbol,
                    strike_price, premium_collected, expiration_date,
                    is_closed, is_assigned, opened_at, quantity
-            FROM dbo.wheel_contracts
+            FROM wheel_contracts
             WHERE cycle_id = :cid
             ORDER BY opened_at ASC
         """), {"cid": int(cycle_id)}).fetchall()

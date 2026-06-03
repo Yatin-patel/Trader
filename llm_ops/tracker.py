@@ -36,7 +36,7 @@ def record_usage(*, project_id: str | None, purpose: str, provider: str,
     cost = _estimate_cost(model, int(prompt_tokens), int(completion_tokens))
     with session_scope() as s:
         row = s.execute(text("""
-            INSERT INTO dbo.llm_usage
+            INSERT INTO llm_usage
                 (project_id, purpose, provider, model, prompt_tokens,
                  completion_tokens, total_tokens, cost_usd, cache_hit)
             OUTPUT INSERTED.usage_id
@@ -66,7 +66,7 @@ def usage_summary(project_id: str | None = None) -> dict[str, Any]:
         row = s.execute(text(
             f"SELECT COUNT(*), ISNULL(SUM(total_tokens),0), "
             f"ISNULL(SUM(cost_usd),0), ISNULL(SUM(CASE WHEN cache_hit=1 THEN 1 ELSE 0 END),0) "
-            f"FROM dbo.llm_usage {where_clause}"
+            f"FROM llm_usage {where_clause}"
         ), params).fetchone()
         out["all_time"] = {
             "calls": int(row[0]), "tokens": int(row[1]),
@@ -78,7 +78,7 @@ def usage_summary(project_id: str | None = None) -> dict[str, Any]:
         row = s.execute(text(
             f"SELECT COUNT(*), ISNULL(SUM(total_tokens),0), "
             f"ISNULL(SUM(cost_usd),0) "
-            f"FROM dbo.llm_usage {today_where}"
+            f"FROM llm_usage {today_where}"
         ), today_params).fetchone()
         out["today"] = {
             "calls": int(row[0]), "tokens": int(row[1]),
@@ -90,7 +90,7 @@ def usage_summary(project_id: str | None = None) -> dict[str, Any]:
         rows = s.execute(text(
             f"SELECT model, COUNT(*), ISNULL(SUM(total_tokens),0), "
             f"ISNULL(SUM(cost_usd),0) "
-            f"FROM dbo.llm_usage {month_where} GROUP BY model"
+            f"FROM llm_usage {month_where} GROUP BY model"
         ), month_params).fetchall()
         out["by_model_30d"] = [{
             "model": r[0], "calls": int(r[1]),
@@ -110,7 +110,7 @@ def list_usage(project_id: str | None = None, limit: int = 50) -> list[dict[str,
         rows = s.execute(text(
             f"SELECT TOP (:lim) usage_id, project_id, purpose, provider, model, "
             f"prompt_tokens, completion_tokens, total_tokens, cost_usd, "
-            f"cache_hit, created_at FROM dbo.llm_usage {where_clause} "
+            f"cache_hit, created_at FROM llm_usage {where_clause} "
             f"ORDER BY usage_id DESC"
         ), params).fetchall()
     return [{

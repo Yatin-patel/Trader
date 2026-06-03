@@ -6,7 +6,7 @@ Two halves:
     S&P watchlist).
   * Outlook per ticker per horizon — hybrid quant (lognormal projection
     over trailing 1y daily returns) + LLM narrative. Cached 12h in
-    dbo.market_outlook_cache.
+    market_outlook_cache.
 """
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def build_universe(project_id: str, *, cap: int = 120) -> list[str]:
 
     with session_scope() as s:
         rows = s.execute(text("""
-            SELECT DISTINCT ticker FROM dbo.closed_contracts
+            SELECT DISTINCT ticker FROM closed_contracts
             WHERE project_id = :p
         """), {"p": project_id}).fetchall()
     for r in rows:
@@ -117,7 +117,7 @@ def _wheel_metrics(project_id: str, ticker: str) -> dict[str, Any]:
                 COUNT(*) AS n,
                 COALESCE(SUM(realized_pnl), 0) AS total,
                 SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins
-            FROM dbo.closed_contracts
+            FROM closed_contracts
             WHERE project_id = :p AND ticker = :t
         """), {"p": project_id, "t": ticker}).fetchone()
     n = int(row[0] or 0)
@@ -272,7 +272,7 @@ def _cache_get(ticker: str, horizon: int) -> dict[str, Any] | None:
     with session_scope() as s:
         row = s.execute(text("""
             SELECT quant_json, llm_text, confidence, direction, generated_at
-            FROM dbo.market_outlook_cache
+            FROM market_outlook_cache
             WHERE ticker = :t AND horizon_days = :h
         """), {"t": ticker.upper(), "h": int(horizon)}).fetchone()
     if not row:
@@ -302,7 +302,7 @@ def _cache_set(ticker: str, horizon: int, *, quant: dict[str, Any] | None,
                direction: str | None) -> None:
     with session_scope() as s:
         exists = s.execute(text("""
-            SELECT 1 FROM dbo.market_outlook_cache
+            SELECT 1 FROM market_outlook_cache
             WHERE ticker = :t AND horizon_days = :h
         """), {"t": ticker.upper(), "h": int(horizon)}).fetchone()
         params = {
@@ -312,15 +312,15 @@ def _cache_set(ticker: str, horizon: int, *, quant: dict[str, Any] | None,
         }
         if exists:
             s.execute(text("""
-                UPDATE dbo.market_outlook_cache
+                UPDATE market_outlook_cache
                 SET quant_json = :q, llm_text = :n,
                     confidence = :c, direction = :d,
-                    generated_at = SYSUTCDATETIME()
+                    generated_at = UTC_TIMESTAMP()
                 WHERE ticker = :t AND horizon_days = :h
             """), params)
         else:
             s.execute(text("""
-                INSERT INTO dbo.market_outlook_cache
+                INSERT INTO market_outlook_cache
                     (ticker, horizon_days, quant_json, llm_text,
                      confidence, direction)
                 VALUES (:t, :h, :q, :n, :c, :d)

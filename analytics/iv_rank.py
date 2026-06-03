@@ -4,7 +4,7 @@ Alpaca doesn't expose historical option IV directly, so we use 30-day
 realized volatility from daily bars as a stable, free proxy. We rank
 the current 30-day window against 1 year of rolling 30-day windows.
 
-Cache lives in dbo.iv_rank_cache with 12h TTL.
+Cache lives in iv_rank_cache with 12h TTL.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _cache_get(ticker: str) -> dict[str, Any] | None:
     with session_scope() as s:
         row = s.execute(text("""
             SELECT iv_rank, realized_vol, sample_days, fetched_at
-            FROM dbo.iv_rank_cache WHERE ticker = :t
+            FROM iv_rank_cache WHERE ticker = :t
         """), {"t": ticker.upper()}).fetchone()
     if not row:
         return None
@@ -51,19 +51,19 @@ def _cache_set(ticker: str, iv_rank: float | None,
                realized_vol: float | None, sample_days: int | None) -> None:
     with session_scope() as s:
         exists = s.execute(text(
-            "SELECT 1 FROM dbo.iv_rank_cache WHERE ticker = :t"
+            "SELECT 1 FROM iv_rank_cache WHERE ticker = :t"
         ), {"t": ticker.upper()}).fetchone()
         if exists:
             s.execute(text("""
-                UPDATE dbo.iv_rank_cache
+                UPDATE iv_rank_cache
                 SET iv_rank = :r, realized_vol = :v,
-                    sample_days = :n, fetched_at = SYSUTCDATETIME()
+                    sample_days = :n, fetched_at = UTC_TIMESTAMP()
                 WHERE ticker = :t
             """), {"t": ticker.upper(), "r": iv_rank,
                    "v": realized_vol, "n": sample_days})
         else:
             s.execute(text("""
-                INSERT INTO dbo.iv_rank_cache
+                INSERT INTO iv_rank_cache
                     (ticker, iv_rank, realized_vol, sample_days)
                 VALUES (:t, :r, :v, :n)
             """), {"t": ticker.upper(), "r": iv_rank,

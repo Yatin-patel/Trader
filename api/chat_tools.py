@@ -170,50 +170,6 @@ def build_tools(project_id: str | None) -> list[Tool]:
         rows = ProjectSettings.list_for_project(project_id)
         return json.dumps({r.key: r.value for r in rows}, default=str)
 
-    # Enum-like settings: only these literal values are accepted by the
-    # AI-chat setter. Reject anything else with a hint.
-    _ENUM_VALUES = {
-        "income_cadence":      {"custom", "weekly", "biweekly", "monthly"},
-        "order_time_in_force": {"day", "gtc", "opg", "cls", "ioc", "fok"},
-    }
-
-    @_safe
-    def set_strategy_setting(key: str, value: str) -> str:
-        """Persist a single project_settings change. Whitelisted to keys
-        in ProjectSettings.DEFAULTS (no credentials, no admin knobs)."""
-        if not project_id:
-            return "no project context"
-        from db.settings_store import _coerce
-        defaults = ProjectSettings.DEFAULTS
-        if key not in defaults:
-            valid = ", ".join(sorted(defaults.keys()))
-            return (f"refused: {key!r} is not a recognized project setting. "
-                    f"Valid keys: {valid}")
-        _, vt, _ = defaults[key]
-        # Enum-value guard for known enum settings
-        if key in _ENUM_VALUES:
-            allowed = _ENUM_VALUES[key]
-            v_lower = str(value).strip().lower()
-            if v_lower not in allowed:
-                return (f"refused: {value!r} is not a valid value for "
-                        f"{key}. Allowed: {sorted(allowed)}")
-            value = v_lower
-        try:
-            coerced = _coerce(str(value), vt)
-        except Exception as e:
-            return (f"refused: could not parse {value!r} as {vt} "
-                    f"for key {key}: {e}")
-        if coerced is None:
-            return f"refused: empty value not allowed for {key}"
-        before = ProjectSettings.get(project_id, key)
-        ProjectSettings.set(project_id, key, coerced, value_type=vt)
-        after = ProjectSettings.get(project_id, key)
-        EventsRepo.log(project_id, "Chat", "SETTING_CHANGE", {
-            "key": key, "before": before, "after": after,
-            "source": "ai_chat",
-        })
-        return f"ok: {key} changed from {before!r} to {after!r}"
-
     @_safe
     def get_db_positions() -> str:
         if not project_id:
@@ -238,25 +194,6 @@ def build_tools(project_id: str | None) -> list[Tool]:
     class _EventsArgs(BaseModel):
         limit: int = Field(20, description="Number of recent events to return")
 
-    class _NoArgs(BaseModel):
-        """Empty schema for zero-argument tools. Without this Gemini
-        rejects the auto-generated `args: array` property because LangChain
-        emits it without an `items` definition."""
-        pass
-
-    class _SetSettingArgs(BaseModel):
-        key: str = Field(..., description=(
-            "Project setting key to change. Must match one of the keys "
-            "returned by get_strategy_settings (e.g. "
-            "max_concentration_per_ticker, csp_delta_min, scanner_max_price, "
-            "watchlist, contracts_per_csp, use_extended_hours, dry_run)."
-        ))
-        value: str = Field(..., description=(
-            "New value as a string. Will be coerced to the setting's "
-            "declared type. Examples: 0.5 for floats, 10 for ints, "
-            "true/false for bools, 'F,SOFI,HOOD' for watchlist."
-        ))
-
     tools.extend([
         StructuredTool.from_function(
             func=get_stock_snapshot,
@@ -276,35 +213,30 @@ def build_tools(project_id: str | None) -> list[Tool]:
             description="List option contracts (puts or calls) with greeks and quotes within a DTE window.",
             args_schema=_ChainArgs,
         ),
-        StructuredTool.from_function(
+        Tool.from_function(
             func=get_account_state,
             name="get_account_state",
             description="Get the live Alpaca account: cash, buying_power, equity, portfolio_value.",
-            args_schema=_NoArgs,
         ),
-        StructuredTool.from_function(
+        Tool.from_function(
             func=get_market_clock,
             name="get_market_clock",
             description="Get current market clock — is_open, next_open, next_close.",
-            args_schema=_NoArgs,
         ),
-        StructuredTool.from_function(
+        Tool.from_function(
             func=get_open_positions,
             name="get_open_positions",
             description="Get all live Alpaca positions (equities and options).",
-            args_schema=_NoArgs,
         ),
-        StructuredTool.from_function(
+        Tool.from_function(
             func=get_open_contracts,
             name="get_open_contracts",
             description="Get open wheel-strategy option contracts tracked in this project's database.",
-            args_schema=_NoArgs,
         ),
-        StructuredTool.from_function(
+        Tool.from_function(
             func=get_db_positions,
             name="get_db_positions",
             description="Get stock positions the trader has opened (tracked in DB, includes stop levels).",
-            args_schema=_NoArgs,
         ),
         StructuredTool.from_function(
             func=get_recent_events,
@@ -312,38 +244,10 @@ def build_tools(project_id: str | None) -> list[Tool]:
             description="The N most recent agent_events for this project.",
             args_schema=_EventsArgs,
         ),
-        StructuredTool.from_function(
+        Tool.from_function(
             func=get_strategy_settings,
             name="get_strategy_settings",
-            description=(
-                "Get the current strategy, risk, and diversification settings "
-                "for this project. Includes delta band (csp_delta_min/max, "
-                "cc_delta_min/max), DTE window, stop loss, IV-rank floor, "
-                "max_concentration_per_ticker (per-symbol collateral cap as "
-                "fraction of buying power), max_open_contracts (total position "
-                "count cap), cc_pyramid_levels and cc_pyramid_spacing_pct "
-                "(covered-call laddering), and more. Call this FIRST when the "
-                "user asks about tuning, diversification, or what their "
-                "current settings are."
-            ),
-            args_schema=_NoArgs,
-        ),
-        StructuredTool.from_function(
-            func=set_strategy_setting,
-            name="set_strategy_setting",
-            description=(
-                "Persist a change to a single project setting. Use when the "
-                "user asks to adjust, change, set, or update a setting "
-                "(e.g. 'change max_concentration_per_ticker to 0.15', "
-                "'lower contracts_per_csp to 1', 'set watchlist to F,SOFI,HOOD'). "
-                "Args: key (string, must be a valid project setting name) "
-                "and value (string, will be coerced to the right type). "
-                "Returns 'ok: ...' on success or 'refused: ...' on invalid input. "
-                "Call get_strategy_settings first if you need to confirm the "
-                "current value before changing it. For multi-setting changes "
-                "call this tool once per key."
-            ),
-            args_schema=_SetSettingArgs,
+            description="Get the current strategy/risk settings for this project (delta band, DTE, stop loss, etc).",
         ),
     ])
     return tools

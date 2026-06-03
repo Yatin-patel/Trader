@@ -33,6 +33,9 @@ from alpaca.trading.requests import (
     GetOptionContractsRequest,
     LimitOrderRequest,
     MarketOrderRequest,
+    StopLossRequest,
+    TakeProfitRequest,
+    TrailingStopOrderRequest,
 )
 
 from db.repositories import TradingProject
@@ -242,6 +245,100 @@ class AlpacaClient(BrokerClient):
             return self._order_dict(order)
         except Exception as e:
             return {"error": str(e), "symbol": symbol}
+
+    def submit_trailing_stop(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        trail_percent: float | None = None,
+        trail_price: float | None = None,
+        time_in_force: str = "day"
+    ) -> dict[str, Any]:
+        """Submit a trailing stop order.
+
+        Args:
+            symbol: Stock or option symbol
+            qty: Number of shares/contracts
+            side: 'buy' or 'sell'
+            trail_percent: Trailing percentage (e.g., 0.05 for 5%)
+            trail_price: Trailing dollar amount (alternative to percent)
+            time_in_force: Order duration
+
+        Returns:
+            Order details dict
+        """
+        req = TrailingStopOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL if side.lower() == "sell" else OrderSide.BUY,
+            time_in_force=TimeInForce(time_in_force.lower()),
+            trail_percent=str(trail_percent * 100) if trail_percent else None,
+            trail_price=str(trail_price) if trail_price else None,
+        )
+        order = self.trading.submit_order(req)
+        return self._order_dict(order)
+
+    def submit_bracket_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        limit_price: float | None = None,
+        take_profit_price: float | None = None,
+        stop_loss_price: float | None = None,
+        time_in_force: str = "day"
+    ) -> dict[str, Any]:
+        """Submit a bracket (OCO) order with take-profit and stop-loss.
+
+        Args:
+            symbol: Stock or option symbol
+            qty: Number of shares/contracts
+            side: 'buy' or 'sell'
+            limit_price: Entry limit price (None for market order)
+            take_profit_price: Take profit limit price
+            stop_loss_price: Stop loss trigger price
+            time_in_force: Order duration
+
+        Returns:
+            Order details dict with parent and child order IDs
+        """
+        order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+
+        # Build the request
+        if limit_price:
+            req = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=order_side,
+                time_in_force=TimeInForce(time_in_force.lower()),
+                limit_price=round(limit_price, 2),
+                order_class="bracket",
+                take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2)) if take_profit_price else None,
+                stop_loss=StopLossRequest(stop_price=round(stop_loss_price, 2)) if stop_loss_price else None,
+            )
+        else:
+            req = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=order_side,
+                time_in_force=TimeInForce(time_in_force.lower()),
+                order_class="bracket",
+                take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2)) if take_profit_price else None,
+                stop_loss=StopLossRequest(stop_price=round(stop_loss_price, 2)) if stop_loss_price else None,
+            )
+
+        order = self.trading.submit_order(req)
+        result = self._order_dict(order)
+
+        # Include child order IDs
+        if hasattr(order, "legs") and order.legs:
+            result["child_orders"] = [
+                {"id": str(leg.id), "type": str(leg.order_type.value if hasattr(leg.order_type, "value") else leg.order_type)}
+                for leg in order.legs
+            ]
+
+        return result
 
     @staticmethod
     def _order_dict(order: Any) -> dict[str, Any]:

@@ -71,7 +71,7 @@ def _check_error_storm(project_id: str, n: int,
     cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=int(window_minutes or 5))
     with session_scope() as s:
         row = s.execute(text("""
-            SELECT COUNT(*) FROM dbo.agent_events
+            SELECT COUNT(*) FROM agent_events
             WHERE project_id = :p
               AND event_type = 'ERROR'
               AND created_at >= :since
@@ -91,7 +91,7 @@ _EVALUATORS = {
 def _deactivate_project(project_id: str) -> None:
     with session_scope() as s:
         s.execute(text("""
-            UPDATE dbo.trading_projects SET is_active = 0
+            UPDATE trading_projects SET is_active = 0
             WHERE project_id = :p
         """), {"p": project_id})
         s.commit()

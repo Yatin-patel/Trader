@@ -119,8 +119,8 @@ def detect_closures(project_id: str) -> dict[str, int]:
         # Mark wheel_contracts.is_closed = 1
         with session_scope() as s:
             s.execute(text("""
-                UPDATE dbo.wheel_contracts
-                SET is_closed = 1, updated_at = SYSUTCDATETIME()
+                UPDATE wheel_contracts
+                SET is_closed = 1, updated_at = UTC_TIMESTAMP()
                 WHERE contract_id = :c
             """), {"c": c["contract_id"]})
             s.commit()
@@ -142,7 +142,7 @@ def detect_closures(project_id: str) -> dict[str, int]:
                 from db.connection import session_scope as _ss
                 with _ss() as s:
                     s.execute(text("""
-                        INSERT INTO dbo.stock_positions
+                        INSERT INTO stock_positions
                             (project_id, ticker, entry_price, current_price,
                              max_loss_threshold, quantity, status,
                              adjusted_cost_basis)

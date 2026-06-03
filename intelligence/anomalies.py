@@ -2,7 +2,7 @@
 
 Compares the last hour's per-node event rate to the prior 24-hour baseline.
 Flags spikes (3× baseline) or droughts (silent nodes that were previously
-active). Persisted to dbo.anomalies and dispatched via the notifier.
+active). Persisted to anomalies and dispatched via the notifier.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def detect_anomalies(project_id: str) -> list[dict[str, Any]]:
         # Per-node-per-hour rate over last 24h.
         rows = s.execute(text("""
             SELECT node_name, event_type, COUNT(*) AS n
-            FROM dbo.agent_events
+            FROM agent_events
             WHERE project_id = :p AND created_at >= :since
             GROUP BY node_name, event_type
         """), {"p": project_id, "since": day_ago}).fetchall()
@@ -38,7 +38,7 @@ def detect_anomalies(project_id: str) -> list[dict[str, Any]]:
 
         last_hour_rows = s.execute(text("""
             SELECT node_name, event_type, COUNT(*) AS n
-            FROM dbo.agent_events
+            FROM agent_events
             WHERE project_id = :p AND created_at >= :since
             GROUP BY node_name, event_type
         """), {"p": project_id, "since": hour_ago}).fetchall()
@@ -78,7 +78,7 @@ def detect_anomalies(project_id: str) -> list[dict[str, Any]]:
     # Special check: ERROR storm in the last hour
     with session_scope() as s:
         row = s.execute(text("""
-            SELECT COUNT(*) FROM dbo.agent_events
+            SELECT COUNT(*) FROM agent_events
             WHERE project_id = :p AND event_type = 'ERROR'
               AND created_at >= :since
         """), {"p": project_id, "since": hour_ago}).fetchone()
@@ -98,7 +98,7 @@ def detect_anomalies(project_id: str) -> list[dict[str, Any]]:
             import json as _json
             for item in out:
                 s.execute(text("""
-                    INSERT INTO dbo.anomalies
+                    INSERT INTO anomalies
                         (project_id, kind, severity,
                          baseline_value, observed_value, details)
                     VALUES (:p, :k, :sev, :bv, :ov, :d)
@@ -130,7 +130,7 @@ def list_anomalies(project_id: str, limit: int = 50) -> list[dict[str, Any]]:
         rows = s.execute(text("""
             SELECT TOP (:lim) anomaly_id, kind, detected_at, severity,
                               baseline_value, observed_value, details
-            FROM dbo.anomalies
+            FROM anomalies
             WHERE project_id = :p
             ORDER BY anomaly_id DESC
         """), {"p": project_id, "lim": int(limit)}).fetchall()

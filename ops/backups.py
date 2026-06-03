@@ -50,9 +50,9 @@ def run_backup() -> dict[str, Any]:
 
     with session_scope() as s:
         row = s.execute(text("""
-            INSERT INTO dbo.backup_log (started_at, status, path)
+            INSERT INTO backup_log (started_at, status, path)
             OUTPUT INSERTED.backup_id
-            VALUES (SYSUTCDATETIME(), 'RUNNING', :p)
+            VALUES (UTC_TIMESTAMP(), 'RUNNING', :p)
         """), {"p": full_path}).fetchone()
         backup_id = int(row[0])
         s.commit()
@@ -112,8 +112,8 @@ def run_backup() -> dict[str, Any]:
 
     with session_scope() as s:
         s.execute(text("""
-            UPDATE dbo.backup_log
-            SET completed_at = SYSUTCDATETIME(),
+            UPDATE backup_log
+            SET completed_at = UTC_TIMESTAMP(),
                 status = :st,
                 size_bytes = :sz,
                 error_message = :err
@@ -152,7 +152,7 @@ def list_backups(limit: int = 20) -> list[dict[str, Any]]:
         rows = s.execute(text("""
             SELECT TOP (:lim) backup_id, started_at, completed_at, status,
                               path, size_bytes, error_message
-            FROM dbo.backup_log
+            FROM backup_log
             ORDER BY backup_id DESC
         """), {"lim": int(limit)}).fetchall()
     return [{

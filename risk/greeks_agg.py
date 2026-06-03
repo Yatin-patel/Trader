@@ -38,22 +38,36 @@ def _aggregate_greeks_uncached(project_id: str) -> dict[str, Any]:
     try:
         client = AlpacaClient(project)
         positions = client.list_positions()
+        account = client.get_account()
     except Exception as e:
         logger.warning("greeks agg: alpaca fetch failed for %s: %s", project_id, e)
         return _empty_greeks(error=str(e))
 
     delta = gamma = theta = vega = 0.0
+    dollar_delta = 0.0  # Delta exposure in dollars
+    daily_theta_dollars = 0.0  # Daily theta decay in dollars
+    gamma_exposure = 0.0  # Dollar gamma (1% move impact)
     contract_count = 0
     share_count = 0
+    equity_value = float(account.get("equity", 0))
+
+    # Track underlying prices for dollar calculations
+    underlying_prices: dict[str, float] = {}
 
     # Group options by underlying to amortize chain queries.
     options_by_underlying: dict[str, list[dict[str, Any]]] = {}
+    equity_positions: list[dict[str, Any]] = []
+
     for p in positions:
         cls = p.get("asset_class") or ""
         if cls == "us_equity":
             qty = float(p["qty"])
+            price = float(p.get("current_price") or p.get("avg_entry_price") or 0)
             delta += qty                       # equity contributes ±1 delta per share
+            dollar_delta += qty * price        # Dollar value of equity positions
             share_count += int(qty)
+            underlying_prices[p["symbol"]] = price
+            equity_positions.append(p)
             continue
         # Options have symbols like NVDA250606P00210000 — first 1-5 chars are ticker.
         sym = p["symbol"]
@@ -63,30 +77,75 @@ def _aggregate_greeks_uncached(project_id: str) -> dict[str, Any]:
     for underlying, opts in options_by_underlying.items():
         try:
             chain = client.option_chain_quotes(underlying)
+            # Get underlying price
+            if underlying not in underlying_prices:
+                snap = client.snapshots([underlying]).get(underlying)
+                if snap:
+                    underlying_prices[underlying] = snap.last_price
         except Exception as e:
             logger.warning("chain fetch failed for %s: %s", underlying, e)
             continue
+
+        underlying_price = underlying_prices.get(underlying, 0)
+
         for op in opts:
             sym = op["symbol"]
             qty = float(op["qty"])  # negative for short
             g = chain.get(sym) or {}
+
+            # Delta
             if g.get("delta") is not None:
-                delta += float(g["delta"]) * qty * 100
+                opt_delta = float(g["delta"]) * qty * 100
+                delta += opt_delta
+                # Dollar delta = delta * underlying price
+                dollar_delta += opt_delta * underlying_price
+
+            # Gamma
             if g.get("gamma") is not None:
-                gamma += float(g["gamma"]) * qty * 100
+                opt_gamma = float(g["gamma"]) * qty * 100
+                gamma += opt_gamma
+                # Gamma exposure: impact of 1% move in underlying
+                # Formula: 0.5 * gamma * (underlying_price * 0.01)^2 * 100
+                if underlying_price > 0:
+                    move_1pct = underlying_price * 0.01
+                    gamma_exposure += 0.5 * opt_gamma * (move_1pct ** 2)
+
+            # Theta
             if g.get("theta") is not None:
-                theta += float(g["theta"]) * qty * 100
+                opt_theta = float(g["theta"]) * qty * 100
+                theta += opt_theta
+                # Daily theta in dollars (theta is already per-contract per day)
+                daily_theta_dollars += opt_theta
+
+            # Vega
             if g.get("vega") is not None:
                 vega += float(g["vega"]) * qty * 100
+
             contract_count += int(abs(qty))
 
+    # Calculate beta-weighted delta (SPY equivalent)
+    # Simplified: assume portfolio beta ≈ 1.0
+    beta_weighted_delta = delta  # Would need individual betas for precision
+
+    # Portfolio delta as percentage of equity
+    delta_pct = (dollar_delta / equity_value * 100) if equity_value > 0 else 0
+
     return {
+        # Standard Greeks
         "delta": round(delta, 2),
         "gamma": round(gamma, 4),
         "theta": round(theta, 2),
-        "vega":  round(vega, 2),
+        "vega": round(vega, 2),
+        # Enhanced metrics
+        "dollar_delta": round(dollar_delta, 2),
+        "delta_pct_of_equity": round(delta_pct, 2),
+        "daily_theta_dollars": round(daily_theta_dollars, 2),
+        "gamma_exposure": round(gamma_exposure, 2),
+        "beta_weighted_delta": round(beta_weighted_delta, 2),
+        # Position counts
         "contract_count": contract_count,
         "share_count": share_count,
+        "equity_value": round(equity_value, 2),
     }
 
 

@@ -1,7 +1,7 @@
 """Earnings calendar checker.
 
 Uses `yfinance` (no API key) to fetch the next earnings date per ticker,
-cached in `dbo.earnings_cache`. Cache TTL is 24 hours.
+cached in `earnings_cache`. Cache TTL is 24 hours.
 """
 from __future__ import annotations
 

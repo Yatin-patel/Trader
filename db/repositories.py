@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -10,6 +11,19 @@ from sqlalchemy import text
 
 from .connection import session_scope
 from .settings_store import _decrypt, _encrypt
+
+
+# UUID validation pattern (accepts standard UUID format)
+_UUID_RE = re.compile(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+)
+
+
+def _is_valid_uuid(val: str | None) -> bool:
+    """Return True if val is a valid UUID string."""
+    if not val:
+        return False
+    return bool(_UUID_RE.match(str(val)))
 
 
 @dataclass
@@ -72,11 +86,14 @@ class ProjectsRepo:
 
     @staticmethod
     def list_active(user_id: str | None = None) -> list[TradingProject]:
-        sql = (f"SELECT {_PROJECT_FIELDS} FROM dbo.trading_projects "
+        sql = (f"SELECT {_PROJECT_FIELDS} FROM trading_projects "
                f"WHERE is_active = 1")
         params: dict[str, Any] = {}
         if user_id is not None:
-            sql += " AND user_id = :u"
+            # Validate UUID format to prevent SQL conversion errors
+            if not _is_valid_uuid(user_id):
+                return []
+            sql += " AND user_id = TRY_CONVERT(UNIQUEIDENTIFIER, :u)"
             params["u"] = user_id
         with session_scope() as s:
             rows = s.execute(text(sql), params).fetchall()
@@ -84,10 +101,13 @@ class ProjectsRepo:
 
     @staticmethod
     def list_all(user_id: str | None = None) -> list[TradingProject]:
-        sql = f"SELECT {_PROJECT_FIELDS} FROM dbo.trading_projects"
+        sql = f"SELECT {_PROJECT_FIELDS} FROM trading_projects"
         params: dict[str, Any] = {}
         if user_id is not None:
-            sql += " WHERE user_id = :u"
+            # Validate UUID format to prevent SQL conversion errors
+            if not _is_valid_uuid(user_id):
+                return []
+            sql += " WHERE user_id = TRY_CONVERT(UNIQUEIDENTIFIER, :u)"
             params["u"] = user_id
         with session_scope() as s:
             rows = s.execute(text(sql), params).fetchall()
@@ -98,11 +118,14 @@ class ProjectsRepo:
             user_id: str | None = None) -> TradingProject | None:
         """Returns None if project doesn't exist OR (when user_id is given)
         the project belongs to another user. Caller treats both as 404."""
-        sql = (f"SELECT {_PROJECT_FIELDS} FROM dbo.trading_projects "
+        sql = (f"SELECT {_PROJECT_FIELDS} FROM trading_projects "
                f"WHERE project_id = :p")
         params: dict[str, Any] = {"p": project_id}
         if user_id is not None:
-            sql += " AND user_id = :u"
+            # Validate UUID format to prevent SQL conversion errors
+            if not _is_valid_uuid(user_id):
+                return None
+            sql += " AND user_id = TRY_CONVERT(UNIQUEIDENTIFIER, :u)"
             params["u"] = user_id
         with session_scope() as s:
             row = s.execute(text(sql), params).fetchone()
@@ -112,7 +135,7 @@ class ProjectsRepo:
     def upsert(project: TradingProject) -> None:
         with session_scope() as s:
             existing = s.execute(
-                text("SELECT 1 FROM dbo.trading_projects WHERE project_id = :p"),
+                text("SELECT 1 FROM trading_projects WHERE project_id = :p"),
                 {"p": project.project_id},
             ).fetchone()
             payload = {
@@ -135,7 +158,7 @@ class ProjectsRepo:
             }
             if existing:
                 s.execute(text("""
-                    UPDATE dbo.trading_projects SET
+                    UPDATE trading_projects SET
                         project_name = :n,
                         alpaca_api_key = :k,
                         alpaca_secret_key = :s,
@@ -151,12 +174,12 @@ class ProjectsRepo:
                         etrade_access_token_secret = :eas,
                         etrade_account_id_key = :eak,
                         etrade_environment = :een,
-                        updated_at = SYSUTCDATETIME()
+                        updated_at = UTC_TIMESTAMP()
                     WHERE project_id = :p
                 """), payload)
             else:
                 s.execute(text("""
-                    INSERT INTO dbo.trading_projects
+                    INSERT INTO trading_projects
                         (project_id, project_name, alpaca_api_key, alpaca_secret_key,
                          alpaca_base_url, alpaca_data_feed, max_equity_allocation,
                          is_active, user_id, broker_type,
@@ -182,12 +205,12 @@ class ProjectsRepo:
                 "eak": account_id_key,
             }
             s.execute(text("""
-                UPDATE dbo.trading_projects SET
+                UPDATE trading_projects SET
                     etrade_access_token = :eat,
                     etrade_access_token_secret = :eas,
                     etrade_account_id_key = COALESCE(:eak, etrade_account_id_key),
-                    etrade_token_renewed_at = SYSUTCDATETIME(),
-                    updated_at = SYSUTCDATETIME()
+                    etrade_token_renewed_at = UTC_TIMESTAMP(),
+                    updated_at = UTC_TIMESTAMP()
                 WHERE project_id = :p
             """), params)
             s.commit()
@@ -195,7 +218,7 @@ class ProjectsRepo:
     @staticmethod
     def delete(project_id: str) -> None:
         with session_scope() as s:
-            s.execute(text("DELETE FROM dbo.trading_projects WHERE project_id = :p"), {"p": project_id})
+            s.execute(text("DELETE FROM trading_projects WHERE project_id = :p"), {"p": project_id})
             s.commit()
 
     @staticmethod
@@ -203,7 +226,7 @@ class ProjectsRepo:
         """Used by migrations + admin tooling to claim a project."""
         with session_scope() as s:
             s.execute(text(
-                "UPDATE dbo.trading_projects SET user_id = :u "
+                "UPDATE trading_projects SET user_id = :u "
                 "WHERE project_id = :p"
             ), {"p": project_id, "u": user_id})
             s.commit()
@@ -215,7 +238,7 @@ class PositionsRepo:
                       stop_loss_dollars: float) -> int:
         with session_scope() as s:
             row = s.execute(text("""
-                INSERT INTO dbo.stock_positions
+                INSERT INTO stock_positions
                     (project_id, ticker, entry_price, current_price, max_loss_threshold, quantity, status)
                 OUTPUT INSERTED.position_id
                 VALUES (:p, :t, :e, :e, :mlt, :q, 'OPEN')
@@ -230,7 +253,7 @@ class PositionsRepo:
             rows = s.execute(text("""
                 SELECT position_id, ticker, entry_price, current_price, max_loss_threshold,
                        quantity, status, opened_at
-                FROM dbo.stock_positions
+                FROM stock_positions
                 WHERE project_id = :p AND status = 'OPEN'
             """), {"p": project_id}).fetchall()
         return [dict(zip(
@@ -243,8 +266,8 @@ class PositionsRepo:
     def close(position_id: int, final_status: str = "CLOSED") -> None:
         with session_scope() as s:
             s.execute(text("""
-                UPDATE dbo.stock_positions
-                SET status = :st, closed_at = SYSUTCDATETIME()
+                UPDATE stock_positions
+                SET status = :st, closed_at = UTC_TIMESTAMP()
                 WHERE position_id = :pid
             """), {"st": final_status, "pid": position_id})
             s.commit()
@@ -253,7 +276,7 @@ class PositionsRepo:
     def update_price(position_id: int, current_price: float) -> None:
         with session_scope() as s:
             s.execute(text("""
-                UPDATE dbo.stock_positions
+                UPDATE stock_positions
                 SET current_price = :cp
                 WHERE position_id = :pid
             """), {"cp": current_price, "pid": position_id})
@@ -272,7 +295,7 @@ class WheelRepo:
         snap_text = _json.dumps(settings_snapshot, default=str) if settings_snapshot else None
         with session_scope() as s:
             row = s.execute(text("""
-                INSERT INTO dbo.wheel_contracts
+                INSERT INTO wheel_contracts
                     (project_id, ticker, strategy_phase, option_symbol, strike_price,
                      premium_collected, expiration_date, delta_at_entry, quantity,
                      underlying_at_entry, settings_snapshot)
@@ -291,7 +314,7 @@ class WheelRepo:
                 SELECT contract_id, ticker, strategy_phase, option_symbol, strike_price,
                        premium_collected, expiration_date, delta_at_entry, is_assigned,
                        opened_at, quantity, underlying_at_entry, settings_snapshot
-                FROM dbo.wheel_contracts
+                FROM wheel_contracts
                 WHERE project_id = :p AND is_closed = 0
             """), {"p": project_id}).fetchall()
         out: list[dict[str, Any]] = []
@@ -316,8 +339,8 @@ class WheelRepo:
     def mark_assigned(contract_id: int) -> None:
         with session_scope() as s:
             s.execute(text("""
-                UPDATE dbo.wheel_contracts
-                SET is_assigned = 1, strategy_phase = 'STOCK_ASSIGNED', updated_at = SYSUTCDATETIME()
+                UPDATE wheel_contracts
+                SET is_assigned = 1, strategy_phase = 'STOCK_ASSIGNED', updated_at = UTC_TIMESTAMP()
                 WHERE contract_id = :c
             """), {"c": contract_id})
             s.commit()
@@ -326,8 +349,8 @@ class WheelRepo:
     def close(contract_id: int) -> None:
         with session_scope() as s:
             s.execute(text("""
-                UPDATE dbo.wheel_contracts
-                SET is_closed = 1, updated_at = SYSUTCDATETIME()
+                UPDATE wheel_contracts
+                SET is_closed = 1, updated_at = UTC_TIMESTAMP()
                 WHERE contract_id = :c
             """), {"c": contract_id})
             s.commit()
@@ -342,7 +365,7 @@ class EventsRepo:
             payload_text = str(payload)
         with session_scope() as s:
             s.execute(text("""
-                INSERT INTO dbo.agent_events (project_id, node_name, event_type, payload)
+                INSERT INTO agent_events (project_id, node_name, event_type, payload)
                 VALUES (:p, :n, :e, :pl)
             """), {"p": project_id, "n": node_name, "e": event_type, "pl": payload_text})
             s.commit()
@@ -368,7 +391,7 @@ class EventsRepo:
             params["bid"] = int(before_id)
         sql = (
             "SELECT TOP (:lim) event_id, node_name, event_type, payload, created_at "
-            "FROM dbo.agent_events "
+            "FROM agent_events "
             f"WHERE {' AND '.join(where)} "
             "ORDER BY event_id DESC"
         )
@@ -391,7 +414,7 @@ class EventsRepo:
         with session_scope() as s:
             rows = s.execute(text("""
                 SELECT TOP (:lim) event_id, node_name, event_type, payload, created_at
-                FROM dbo.agent_events
+                FROM agent_events
                 WHERE project_id = :p
                 ORDER BY created_at DESC
             """), {"lim": limit, "p": project_id}).fetchall()

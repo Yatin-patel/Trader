@@ -15,7 +15,7 @@ from datetime import date
 from typing import Any
 
 from db.repositories import EventsRepo, ProjectsRepo, WheelRepo
-from db.settings_store import ProjectSettings, effective_csp_band
+from db.settings_store import ProjectSettings
 from execution import AlpacaClient
 from risk.greeks_agg import _extract_underlying
 
@@ -49,33 +49,14 @@ def evaluate_auto_roll(project_id: str) -> list[dict[str, Any]]:
     dry_run = bool(ProjectSettings.get(project_id, "dry_run"))
     tif = str(ProjectSettings.get(project_id, "order_time_in_force") or "day")
 
-    # Cadence-drift roll: if a preset cadence is active and an OPEN CSP's
-    # remaining DTE sits outside the preset band, roll it onto the cadence.
-    # Only applies to CSPs — CCs follow assignment dynamics, not income cadence.
-    band = effective_csp_band(project_id)
-    cadence_active = band["cadence"] != "custom"
-
     candidates: list[dict[str, Any]] = []
     for c in open_contracts:
         exp = c.get("expiration_date")
         if not exp:
             continue
         dte = (exp - today).days
-        if dte < 0:
+        if dte > dte_threshold or dte < 0:
             continue
-        # Trigger 1: near expiration (existing behaviour)
-        near_expiry = dte <= dte_threshold
-        # Trigger 2: cadence drift — only for CSPs, only when a preset is set.
-        cadence_drift = (
-            cadence_active
-            and c.get("strategy_phase") == "CASH_SECURED_PUT"
-            and (dte < band["min_dte"] or dte > band["max_dte"])
-            # Don't double-roll: skip if near_expiry already fires.
-            and not near_expiry
-        )
-        if not (near_expiry or cadence_drift):
-            continue
-        c["_roll_reason"] = "near_expiry" if near_expiry else "cadence_drift"
         candidates.append(c)
 
     if not candidates:
@@ -121,8 +102,6 @@ def evaluate_auto_roll(project_id: str) -> list[dict[str, Any]]:
             "underlying_price": snap.last_price,
             "qty": qty,
             "close_price": mid,
-            "roll_reason": c.get("_roll_reason", "near_expiry"),
-            "cadence": band["cadence"],
         }
         if dry_run:
             attempt["status"] = "DRY_RUN"
@@ -138,24 +117,14 @@ def evaluate_auto_roll(project_id: str) -> list[dict[str, Any]]:
                 attempt["status"] = "ERROR"
                 attempt["error"] = str(e)
         actions.append(attempt)
-        if attempt["roll_reason"] == "cadence_drift":
-            why = (
-                f"DTE {attempt['dte']} is outside the '{band['cadence']}' "
-                f"cadence band [{band['min_dte']}-{band['max_dte']}]"
-            )
-        else:
-            why = (
-                f"only {attempt['dte']} day(s) from expiry "
-                f"(threshold {dte_threshold})"
-            )
         EventsRepo.log(project_id, "AutoRoll", "CLOSE_FOR_ROLL", {
             **attempt,
             "narrative": [
-                f"Auto-roll: {c['ticker']} {sym} — {why}; OTM "
-                f"(strike ${c['strike_price']}, underlying "
-                f"${snap.last_price:.2f}).",
+                f"Auto-roll: {c['ticker']} {sym} is {attempt['dte']} day(s) "
+                f"from expiry and OTM (strike ${c['strike_price']}, "
+                f"underlying ${snap.last_price:.2f}).",
                 f"Closing for ${mid:.2f}; Strategist will reopen a new "
-                f"contract on the next cycle.",
+                f"contract further out on the next cycle.",
             ],
         })
     return actions

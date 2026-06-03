@@ -102,7 +102,7 @@ def run_backtest(project_id: str, *, from_date: date, to_date: date,
     }
     with session_scope() as s:
         row = s.execute(text("""
-            INSERT INTO dbo.backtest_runs
+            INSERT INTO backtest_runs
                 (project_id, name, from_date, to_date, status, params)
             OUTPUT INSERTED.run_id
             VALUES (:p, :n, :fd, :td, 'RUNNING', :pa)
@@ -219,8 +219,8 @@ def run_backtest(project_id: str, *, from_date: date, to_date: date,
 
     with session_scope() as s:
         s.execute(text("""
-            UPDATE dbo.backtest_runs
-            SET status = 'COMPLETE', completed_at = SYSUTCDATETIME(),
+            UPDATE backtest_runs
+            SET status = 'COMPLETE', completed_at = UTC_TIMESTAMP(),
                 result = :r
             WHERE run_id = :rid
         """), {"r": json.dumps(summary), "rid": run_id})
@@ -234,7 +234,7 @@ def list_runs(project_id: str, limit: int = 25) -> list[dict[str, Any]]:
         rows = s.execute(text("""
             SELECT TOP (:lim) run_id, name, from_date, to_date, started_at,
                               completed_at, status
-            FROM dbo.backtest_runs
+            FROM backtest_runs
             WHERE project_id = :p
             ORDER BY run_id DESC
         """), {"p": project_id, "lim": int(limit)}).fetchall()
@@ -252,7 +252,7 @@ def get_run(project_id: str, run_id: int) -> dict[str, Any] | None:
         row = s.execute(text("""
             SELECT name, from_date, to_date, started_at, completed_at,
                    status, params, result
-            FROM dbo.backtest_runs
+            FROM backtest_runs
             WHERE run_id = :rid AND project_id = :p
         """), {"rid": int(run_id), "p": project_id}).fetchone()
     if not row:

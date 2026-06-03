@@ -10,10 +10,7 @@ venv/
 logs/
 .idea/
 .vscode/
-.claude/
 .DS_Store
 *.egg-info/
 dist/
 build/
-exports/
-backups/

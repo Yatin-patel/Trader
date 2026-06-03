@@ -1,6 +1,6 @@
 """Server-side session store.
 
-Sessions are random GUIDs stored in dbo.user_sessions with a 14-day TTL.
+Sessions are random GUIDs stored in user_sessions with a 14-day TTL.
 The token is set in an HttpOnly cookie. Logout deletes the row.
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ def create_session(user_id: str, *, ip: str | None = None,
     expires = datetime.now(tz=timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
     with session_scope() as s:
         s.execute(text("""
-            INSERT INTO dbo.user_sessions
+            INSERT INTO user_sessions
                 (session_token, user_id, expires_at, ip_address, user_agent)
             VALUES (:t, :u, :e, :ip, :ua)
         """), {"t": token, "u": user_id, "e": expires,
@@ -45,7 +45,7 @@ def get_session(token: str) -> dict[str, Any] | None:
         return None
     with session_scope() as s:
         row = s.execute(text("""
-            SELECT user_id, expires_at FROM dbo.user_sessions
+            SELECT user_id, expires_at FROM user_sessions
             WHERE session_token = :t
         """), {"t": token}).fetchone()
         if not row:
@@ -56,7 +56,7 @@ def get_session(token: str) -> dict[str, Any] | None:
         if expires_at and expires_at < datetime.now(tz=timezone.utc):
             # Expired — clean up.
             s.execute(text("""
-                DELETE FROM dbo.user_sessions WHERE session_token = :t
+                DELETE FROM user_sessions WHERE session_token = :t
             """), {"t": token})
             s.commit()
             return None
@@ -68,7 +68,7 @@ def revoke_session(token: str) -> None:
         return
     with session_scope() as s:
         s.execute(text(
-            "DELETE FROM dbo.user_sessions WHERE session_token = :t"
+            "DELETE FROM user_sessions WHERE session_token = :t"
         ), {"t": token})
         s.commit()
 
@@ -77,7 +77,7 @@ def revoke_all_for_user(user_id: str) -> int:
     """Log the user out of every session. Returns number of sessions killed."""
     with session_scope() as s:
         result = s.execute(text(
-            "DELETE FROM dbo.user_sessions WHERE user_id = :u"
+            "DELETE FROM user_sessions WHERE user_id = :u"
         ), {"u": user_id})
         s.commit()
         return result.rowcount or 0
@@ -89,7 +89,7 @@ def revoke_others_for_user(user_id: str, keep_token: str) -> int:
         return 0
     with session_scope() as s:
         result = s.execute(text(
-            "DELETE FROM dbo.user_sessions "
+            "DELETE FROM user_sessions "
             "WHERE user_id = :u AND session_token <> :t"
         ), {"u": user_id, "t": keep_token})
         s.commit()
@@ -101,8 +101,8 @@ def list_for_user(user_id: str) -> list[dict[str, Any]]:
     with session_scope() as s:
         rows = s.execute(text("""
             SELECT session_token, created_at, expires_at, ip_address, user_agent
-            FROM dbo.user_sessions
-            WHERE user_id = :u AND expires_at > SYSUTCDATETIME()
+            FROM user_sessions
+            WHERE user_id = :u AND expires_at > UTC_TIMESTAMP()
             ORDER BY created_at DESC
         """), {"u": user_id}).fetchall()
     out = []

@@ -1,14 +1,20 @@
 """Pure functions to compute P&L metrics from closed trades + snapshots."""
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+import numpy as np
 
 from db.analytics_repos import (
     ClosedContractsRepo,
     ClosedPositionsRepo,
     PortfolioSnapshotsRepo,
 )
+
+# Risk-free rate assumption (annual)
+RISK_FREE_RATE = 0.05
 
 
 def _utc_start_of_day() -> datetime:
@@ -118,3 +124,208 @@ def equity_curve_points(project_id: str, period: str = "month") -> list[dict[str
     else:
         since = datetime(1970, 1, 1, tzinfo=timezone.utc)
     return PortfolioSnapshotsRepo.curve(project_id, since=since)
+
+
+def calculate_sharpe_ratio(
+    project_id: str,
+    period_days: int = 252,
+    risk_free_rate: float = RISK_FREE_RATE
+) -> dict[str, Any]:
+    """Calculate Sharpe Ratio for the portfolio.
+
+    Sharpe = (Portfolio Return - Risk-Free Rate) / Portfolio Std Dev
+
+    Args:
+        project_id: Trading project ID
+        period_days: Lookback period in days (252 = 1 trading year)
+        risk_free_rate: Annual risk-free rate (default 5%)
+
+    Returns:
+        Dict with Sharpe ratio and components
+    """
+    since = datetime.now(tz=timezone.utc) - timedelta(days=period_days)
+    curve = PortfolioSnapshotsRepo.curve(project_id, since=since)
+
+    if len(curve) < 10:
+        return {"error": "Insufficient data for Sharpe calculation", "data_points": len(curve)}
+
+    equities = np.array([pt["equity"] for pt in curve])
+
+    # Calculate daily returns
+    returns = np.diff(equities) / equities[:-1]
+    returns = returns[~np.isnan(returns)]  # Remove NaN
+
+    if len(returns) < 5:
+        return {"error": "Insufficient return data", "data_points": len(returns)}
+
+    # Annualize returns and volatility
+    mean_daily_return = float(np.mean(returns))
+    std_daily_return = float(np.std(returns))
+
+    annualized_return = mean_daily_return * 252
+    annualized_volatility = std_daily_return * math.sqrt(252)
+
+    # Sharpe ratio
+    if annualized_volatility == 0:
+        sharpe = 0.0
+    else:
+        sharpe = (annualized_return - risk_free_rate) / annualized_volatility
+
+    return {
+        "sharpe_ratio": round(sharpe, 3),
+        "annualized_return_pct": round(annualized_return * 100, 2),
+        "annualized_volatility_pct": round(annualized_volatility * 100, 2),
+        "risk_free_rate_pct": round(risk_free_rate * 100, 2),
+        "data_points": len(returns),
+        "period_days": period_days,
+        "interpretation": _interpret_sharpe(sharpe),
+    }
+
+
+def _interpret_sharpe(sharpe: float) -> str:
+    """Provide interpretation of Sharpe ratio."""
+    if sharpe < 0:
+        return "Negative returns vs risk-free rate"
+    elif sharpe < 0.5:
+        return "Poor risk-adjusted returns"
+    elif sharpe < 1.0:
+        return "Acceptable risk-adjusted returns"
+    elif sharpe < 2.0:
+        return "Good risk-adjusted returns"
+    elif sharpe < 3.0:
+        return "Excellent risk-adjusted returns"
+    else:
+        return "Outstanding (verify data accuracy)"
+
+
+def calculate_sortino_ratio(
+    project_id: str,
+    period_days: int = 252,
+    risk_free_rate: float = RISK_FREE_RATE,
+    mar: float | None = None
+) -> dict[str, Any]:
+    """Calculate Sortino Ratio for the portfolio.
+
+    Sortino = (Portfolio Return - MAR) / Downside Deviation
+
+    Unlike Sharpe, Sortino only penalizes downside volatility.
+
+    Args:
+        project_id: Trading project ID
+        period_days: Lookback period in days
+        risk_free_rate: Annual risk-free rate
+        mar: Minimum Acceptable Return (defaults to risk-free rate)
+
+    Returns:
+        Dict with Sortino ratio and components
+    """
+    if mar is None:
+        mar = risk_free_rate
+
+    since = datetime.now(tz=timezone.utc) - timedelta(days=period_days)
+    curve = PortfolioSnapshotsRepo.curve(project_id, since=since)
+
+    if len(curve) < 10:
+        return {"error": "Insufficient data for Sortino calculation", "data_points": len(curve)}
+
+    equities = np.array([pt["equity"] for pt in curve])
+
+    # Calculate daily returns
+    returns = np.diff(equities) / equities[:-1]
+    returns = returns[~np.isnan(returns)]
+
+    if len(returns) < 5:
+        return {"error": "Insufficient return data", "data_points": len(returns)}
+
+    # Daily MAR
+    mar_daily = mar / 252
+
+    # Downside returns (only negative relative to MAR)
+    downside_returns = returns - mar_daily
+    downside_returns = np.minimum(downside_returns, 0)
+
+    # Downside deviation (semi-deviation)
+    downside_deviation = float(np.sqrt(np.mean(downside_returns ** 2)))
+    annualized_downside = downside_deviation * math.sqrt(252)
+
+    # Annualized return
+    mean_daily_return = float(np.mean(returns))
+    annualized_return = mean_daily_return * 252
+
+    # Sortino ratio
+    if annualized_downside == 0:
+        sortino = 0.0 if annualized_return <= mar else float("inf")
+    else:
+        sortino = (annualized_return - mar) / annualized_downside
+
+    # Handle inf for display
+    sortino_display = round(sortino, 3) if sortino != float("inf") else None
+
+    return {
+        "sortino_ratio": sortino_display,
+        "annualized_return_pct": round(annualized_return * 100, 2),
+        "downside_deviation_pct": round(annualized_downside * 100, 2),
+        "mar_pct": round(mar * 100, 2),
+        "data_points": len(returns),
+        "period_days": period_days,
+        "interpretation": _interpret_sortino(sortino),
+    }
+
+
+def _interpret_sortino(sortino: float) -> str:
+    """Provide interpretation of Sortino ratio."""
+    if sortino == float("inf"):
+        return "Perfect (no downside deviation)"
+    elif sortino < 0:
+        return "Returns below minimum acceptable"
+    elif sortino < 1.0:
+        return "Poor downside-adjusted returns"
+    elif sortino < 2.0:
+        return "Acceptable downside-adjusted returns"
+    elif sortino < 3.0:
+        return "Good downside-adjusted returns"
+    else:
+        return "Excellent downside-adjusted returns"
+
+
+def calculate_risk_ratios(project_id: str, period_days: int = 252) -> dict[str, Any]:
+    """Calculate all risk ratios in one call.
+
+    Args:
+        project_id: Trading project ID
+        period_days: Lookback period
+
+    Returns:
+        Dict with all risk metrics
+    """
+    sharpe = calculate_sharpe_ratio(project_id, period_days)
+    sortino = calculate_sortino_ratio(project_id, period_days)
+
+    # Get summary for additional context
+    period = "ytd" if period_days >= 252 else "month"
+    summary = metrics_summary(project_id, period)
+
+    # Calmar ratio (return / max drawdown)
+    max_dd = summary.get("max_drawdown", 0)
+    ann_return = sharpe.get("annualized_return_pct", 0) / 100
+
+    if max_dd > 0:
+        calmar = ann_return / (max_dd / summary.get("current_equity", 1) * 100)
+    else:
+        calmar = None
+
+    return {
+        "project_id": project_id,
+        "period_days": period_days,
+        "sharpe_ratio": sharpe.get("sharpe_ratio"),
+        "sortino_ratio": sortino.get("sortino_ratio"),
+        "calmar_ratio": round(calmar, 3) if calmar else None,
+        "annualized_return_pct": sharpe.get("annualized_return_pct"),
+        "annualized_volatility_pct": sharpe.get("annualized_volatility_pct"),
+        "downside_deviation_pct": sortino.get("downside_deviation_pct"),
+        "max_drawdown": summary.get("max_drawdown"),
+        "win_rate": summary.get("win_rate"),
+        "profit_factor": summary.get("profit_factor"),
+        "data_points": sharpe.get("data_points"),
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }

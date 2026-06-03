@@ -33,7 +33,7 @@ def _cache_get(ticker: str) -> dict[str, Any] | None:
     with session_scope() as s:
         row = s.execute(text("""
             SELECT sentiment_score, headlines, rationale, fetched_at
-            FROM dbo.news_sentiment_cache WHERE ticker = :t
+            FROM news_sentiment_cache WHERE ticker = :t
         """), {"t": ticker.upper()}).fetchone()
     if not row:
         return None
@@ -49,21 +49,21 @@ def _cache_set(ticker: str, score: float | None,
                headlines: list[str], rationale: str | None) -> None:
     with session_scope() as s:
         exists = s.execute(text(
-            "SELECT 1 FROM dbo.news_sentiment_cache WHERE ticker = :t"
+            "SELECT 1 FROM news_sentiment_cache WHERE ticker = :t"
         ), {"t": ticker.upper()}).fetchone()
         payload = json.dumps(headlines[:_MAX_HEADLINES])
         params = {"t": ticker.upper(), "s": score, "h": payload,
                   "r": (rationale or "")[:1000]}
         if exists:
             s.execute(text("""
-                UPDATE dbo.news_sentiment_cache
+                UPDATE news_sentiment_cache
                 SET sentiment_score = :s, headlines = :h, rationale = :r,
-                    fetched_at = SYSUTCDATETIME()
+                    fetched_at = UTC_TIMESTAMP()
                 WHERE ticker = :t
             """), params)
         else:
             s.execute(text("""
-                INSERT INTO dbo.news_sentiment_cache
+                INSERT INTO news_sentiment_cache
                     (ticker, sentiment_score, headlines, rationale)
                 VALUES (:t, :s, :h, :r)
             """), params)

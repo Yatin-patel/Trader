@@ -654,6 +654,196 @@ GO
 -- ---------------------------------------------------------------------------
 -- 8. Seed default global settings (all UI-editable)
 -- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- 9. Day Trading Tables (Phase 2)
+-- ---------------------------------------------------------------------------
+
+-- Intraday trading signals (RSI/MACD)
+IF OBJECT_ID('dbo.intraday_signals', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.intraday_signals (
+        signal_id       BIGINT IDENTITY(1,1) PRIMARY KEY,
+        project_id      VARCHAR(64) NOT NULL,
+        ticker          VARCHAR(12) NOT NULL,
+        signal_type     VARCHAR(20) NOT NULL,  -- BUY|SELL|NEUTRAL
+        signal_value    DECIMAL(8,4) NOT NULL,
+        rsi             DECIMAL(8,4) NULL,
+        macd_line       DECIMAL(12,6) NULL,
+        macd_signal     DECIMAL(12,6) NULL,
+        macd_histogram  DECIMAL(12,6) NULL,
+        vwap            DECIMAL(18,4) NULL,
+        underlying_price DECIMAL(18,4) NULL,
+        created_at      DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        expires_at      DATETIME2 NOT NULL,
+        CONSTRAINT FK_intraday_signals_project FOREIGN KEY (project_id)
+            REFERENCES dbo.trading_projects(project_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IX_intraday_signals_project_ticker
+        ON dbo.intraday_signals(project_id, ticker, created_at DESC);
+END
+GO
+
+-- Bracket (OCO) orders
+IF OBJECT_ID('dbo.bracket_orders', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.bracket_orders (
+        bracket_id              BIGINT IDENTITY(1,1) PRIMARY KEY,
+        project_id              VARCHAR(64) NOT NULL,
+        parent_order_id         VARCHAR(64) NOT NULL,
+        take_profit_order_id    VARCHAR(64) NULL,
+        stop_loss_order_id      VARCHAR(64) NULL,
+        symbol                  VARCHAR(64) NOT NULL,
+        parent_qty              DECIMAL(18,4) NOT NULL,
+        take_profit_price       DECIMAL(18,4) NULL,
+        stop_loss_price         DECIMAL(18,4) NULL,
+        status                  VARCHAR(20) NOT NULL DEFAULT 'OPEN',
+        created_at              DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        closed_at               DATETIME2 NULL,
+        exit_reason             VARCHAR(32) NULL,
+        CONSTRAINT FK_bracket_orders_project FOREIGN KEY (project_id)
+            REFERENCES dbo.trading_projects(project_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IX_bracket_orders_project_status
+        ON dbo.bracket_orders(project_id, status);
+END
+GO
+
+-- Day trade log (PDT tracking)
+IF OBJECT_ID('dbo.day_trade_log', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.day_trade_log (
+        trade_id        BIGINT IDENTITY(1,1) PRIMARY KEY,
+        project_id      VARCHAR(64) NOT NULL,
+        symbol          VARCHAR(64) NOT NULL,
+        open_order_id   VARCHAR(64) NOT NULL,
+        close_order_id  VARCHAR(64) NOT NULL,
+        trade_date      DATETIME2 NOT NULL,
+        created_at      DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT FK_day_trade_log_project FOREIGN KEY (project_id)
+            REFERENCES dbo.trading_projects(project_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IX_day_trade_log_project_date
+        ON dbo.day_trade_log(project_id, trade_date);
+END
+GO
+
+-- ---------------------------------------------------------------------------
+-- 10. Long-Term Investing Tables (Phase 3)
+-- ---------------------------------------------------------------------------
+
+-- Dividend events
+IF OBJECT_ID('dbo.dividend_events', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.dividend_events (
+        event_id        BIGINT IDENTITY(1,1) PRIMARY KEY,
+        project_id      VARCHAR(64) NOT NULL,
+        ticker          VARCHAR(12) NOT NULL,
+        ex_date         DATE NOT NULL,
+        record_date     DATE NULL,
+        pay_date        DATE NULL,
+        amount          DECIMAL(18,6) NOT NULL,
+        shares_held     INT NOT NULL,
+        total_amount    DECIMAL(18,4) NOT NULL,
+        status          VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+        created_at      DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT FK_dividend_events_project FOREIGN KEY (project_id)
+            REFERENCES dbo.trading_projects(project_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IX_dividend_events_project_ticker
+        ON dbo.dividend_events(project_id, ticker, ex_date);
+END
+GO
+
+-- DCA schedules
+IF OBJECT_ID('dbo.dca_schedules', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.dca_schedules (
+        schedule_id             BIGINT IDENTITY(1,1) PRIMARY KEY,
+        project_id              VARCHAR(64) NOT NULL,
+        ticker                  VARCHAR(12) NOT NULL,
+        frequency               VARCHAR(20) NOT NULL DEFAULT 'weekly',
+        amount_dollars          DECIMAL(18,2) NOT NULL,
+        next_execution_date     DATE NOT NULL,
+        last_execution_date     DATE NULL,
+        enabled                 BIT NOT NULL DEFAULT 1,
+        total_invested          DECIMAL(18,2) NOT NULL DEFAULT 0,
+        total_shares            DECIMAL(18,6) NOT NULL DEFAULT 0,
+        execution_count         INT NOT NULL DEFAULT 0,
+        created_at              DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        updated_at              DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT FK_dca_schedules_project FOREIGN KEY (project_id)
+            REFERENCES dbo.trading_projects(project_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IX_dca_schedules_project_enabled
+        ON dbo.dca_schedules(project_id, enabled, next_execution_date);
+END
+GO
+
+-- Target allocations for rebalancing
+IF OBJECT_ID('dbo.target_allocations', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.target_allocations (
+        allocation_id           BIGINT IDENTITY(1,1) PRIMARY KEY,
+        project_id              VARCHAR(64) NOT NULL,
+        ticker                  VARCHAR(12) NOT NULL,
+        target_pct              DECIMAL(8,4) NOT NULL,
+        rebalance_threshold_pct DECIMAL(8,4) NOT NULL DEFAULT 0.05,
+        created_at              DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        updated_at              DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT FK_target_allocations_project FOREIGN KEY (project_id)
+            REFERENCES dbo.trading_projects(project_id) ON DELETE CASCADE,
+        CONSTRAINT UQ_target_allocations UNIQUE (project_id, ticker)
+    );
+    CREATE INDEX IX_target_allocations_project
+        ON dbo.target_allocations(project_id);
+END
+GO
+
+-- ---------------------------------------------------------------------------
+-- 11. Advanced Options Tables (Phase 4)
+-- ---------------------------------------------------------------------------
+
+-- Multi-leg orders (iron condors, spreads, etc.)
+IF OBJECT_ID('dbo.multi_leg_orders', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.multi_leg_orders (
+        order_id        BIGINT IDENTITY(1,1) PRIMARY KEY,
+        project_id      VARCHAR(64) NOT NULL,
+        strategy_type   VARCHAR(32) NOT NULL,
+        underlying      VARCHAR(12) NOT NULL,
+        status          VARCHAR(20) NOT NULL DEFAULT 'OPEN',
+        leg1_symbol     VARCHAR(64) NULL,
+        leg1_side       VARCHAR(8) NULL,
+        leg1_qty        INT NULL,
+        leg2_symbol     VARCHAR(64) NULL,
+        leg2_side       VARCHAR(8) NULL,
+        leg2_qty        INT NULL,
+        leg3_symbol     VARCHAR(64) NULL,
+        leg3_side       VARCHAR(8) NULL,
+        leg3_qty        INT NULL,
+        leg4_symbol     VARCHAR(64) NULL,
+        leg4_side       VARCHAR(8) NULL,
+        leg4_qty        INT NULL,
+        net_credit      DECIMAL(18,4) NULL,
+        max_loss        DECIMAL(18,4) NULL,
+        max_profit      DECIMAL(18,4) NULL,
+        expiration      DATE NULL,
+        opened_at       DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        closed_at       DATETIME2 NULL,
+        realized_pnl    DECIMAL(18,4) NULL,
+        CONSTRAINT FK_multi_leg_orders_project FOREIGN KEY (project_id)
+            REFERENCES dbo.trading_projects(project_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IX_multi_leg_orders_project_status
+        ON dbo.multi_leg_orders(project_id, status);
+    CREATE INDEX IX_multi_leg_orders_strategy
+        ON dbo.multi_leg_orders(project_id, strategy_type, status);
+END
+GO
+
+-- ---------------------------------------------------------------------------
+-- 12. Seed default global settings (all UI-editable)
+-- ---------------------------------------------------------------------------
 MERGE dbo.app_settings AS tgt
 USING (VALUES
     ('llm_provider',             'anthropic',                       'string', 'llm',      'Which LLM to use: anthropic | google',                               0),

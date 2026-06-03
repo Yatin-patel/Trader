@@ -21,7 +21,7 @@ class ChannelsRepo:
         sql = (
             "SELECT channel_id, channel_type, name, target, config, events_filter,"
             " enabled, created_at, last_sent_at, last_error, send_count "
-            "FROM dbo.notification_channels "
+            "FROM notification_channels "
             f"WHERE {' AND '.join(where)} "
             "ORDER BY created_at DESC"
         )
@@ -61,7 +61,7 @@ class ChannelsRepo:
         with session_scope() as s:
             if channel_id:
                 s.execute(text("""
-                    UPDATE dbo.notification_channels
+                    UPDATE notification_channels
                     SET channel_type = :ct, name = :nm, target = :tg,
                         config = :cf, events_filter = :ef, enabled = :en
                     WHERE channel_id = :cid AND project_id = :p
@@ -72,7 +72,7 @@ class ChannelsRepo:
                 s.commit()
                 return channel_id
             row = s.execute(text("""
-                INSERT INTO dbo.notification_channels
+                INSERT INTO notification_channels
                     (project_id, channel_type, name, target, config,
                      events_filter, enabled)
                 OUTPUT INSERTED.channel_id
@@ -87,7 +87,7 @@ class ChannelsRepo:
     def delete(project_id: str, channel_id: int) -> None:
         with session_scope() as s:
             s.execute(text("""
-                DELETE FROM dbo.notification_channels
+                DELETE FROM notification_channels
                 WHERE channel_id = :cid AND project_id = :p
             """), {"cid": channel_id, "p": project_id})
             s.commit()
@@ -97,8 +97,8 @@ class ChannelsRepo:
                     error: str | None = None) -> None:
         with session_scope() as s:
             s.execute(text("""
-                UPDATE dbo.notification_channels
-                SET last_sent_at = SYSUTCDATETIME(),
+                UPDATE notification_channels
+                SET last_sent_at = UTC_TIMESTAMP(),
                     last_error = :err,
                     send_count = send_count + 1
                 WHERE channel_id = :cid
@@ -120,7 +120,7 @@ class NotificationsRepo:
         payload_text = json.dumps(payload, default=str) if payload else None
         with session_scope() as s:
             row = s.execute(text("""
-                INSERT INTO dbo.notifications
+                INSERT INTO notifications
                     (project_id, channel_id, title, body, severity,
                      event_type, payload, status)
                 OUTPUT INSERTED.notification_id
@@ -136,8 +136,8 @@ class NotificationsRepo:
                   error: str | None = None) -> None:
         with session_scope() as s:
             s.execute(text("""
-                UPDATE dbo.notifications
-                SET status = :st, sent_at = SYSUTCDATETIME(),
+                UPDATE notifications
+                SET status = :st, sent_at = UTC_TIMESTAMP(),
                     error_message = :err
                 WHERE notification_id = :nid
             """), {"st": "sent" if ok else "failed",
@@ -156,7 +156,7 @@ class NotificationsRepo:
             "SELECT TOP (:lim) notification_id, channel_id, title, body,"
             " severity, event_type, payload, status, sent_at, read_at,"
             " created_at, error_message "
-            "FROM dbo.notifications "
+            "FROM notifications "
             f"WHERE {' AND '.join(where)} "
             "ORDER BY notification_id DESC"
         )
@@ -184,7 +184,7 @@ class NotificationsRepo:
     def unread_count(project_id: str) -> int:
         with session_scope() as s:
             row = s.execute(text("""
-                SELECT COUNT(*) FROM dbo.notifications
+                SELECT COUNT(*) FROM notifications
                 WHERE project_id = :p AND read_at IS NULL
             """), {"p": project_id}).fetchone()
         return int(row[0] or 0)
@@ -195,8 +195,8 @@ class NotificationsRepo:
         with session_scope() as s:
             if all_unread:
                 row = s.execute(text("""
-                    UPDATE dbo.notifications
-                    SET read_at = SYSUTCDATETIME()
+                    UPDATE notifications
+                    SET read_at = UTC_TIMESTAMP()
                     WHERE project_id = :p AND read_at IS NULL
                 """), {"p": project_id})
                 s.commit()
@@ -206,8 +206,8 @@ class NotificationsRepo:
             n = 0
             for nid in ids:
                 row = s.execute(text("""
-                    UPDATE dbo.notifications
-                    SET read_at = SYSUTCDATETIME()
+                    UPDATE notifications
+                    SET read_at = UTC_TIMESTAMP()
                     WHERE notification_id = :nid AND project_id = :p
                       AND read_at IS NULL
                 """), {"nid": int(nid), "p": project_id})
