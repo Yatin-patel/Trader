@@ -124,6 +124,15 @@ def risk_guardrail_node(state: dict[str, Any]) -> dict[str, Any]:
     max_sector_pct = float(ProjectSettings.get(
         project_id, "max_concentration_per_sector", default=0) or 0)
     sector_used: dict[str, float] = {}
+    # Same stable-reference rule as per-ticker concentration: use the
+    # project's max_equity_allocation budget rather than fluctuating
+    # options_buying_power. Otherwise a 30% sector cap shrinks as
+    # positions open and silently blocks every mid-cap trade.
+    try:
+        from risk.concentration import _resolve_reference as _resolve_ref
+        sector_reference, _src = _resolve_ref(project_id, buying_power)
+    except Exception:
+        sector_reference = buying_power
     if max_sector_pct > 0:
         try:
             from risk.sectors import sector_of, sector_used_collateral
@@ -151,19 +160,20 @@ def risk_guardrail_node(state: dict[str, Any]) -> dict[str, Any]:
             })
             continue
 
-        # Per-sector concentration
-        if max_sector_pct > 0 and buying_power > 0:
+        # Per-sector concentration. Cap is % of the stable reference
+        # (max_equity_allocation), NOT of fluctuating options_buying_power.
+        if max_sector_pct > 0 and sector_reference > 0:
             try:
                 from risk.sectors import sector_of
                 sec = sector_of(trade["ticker"])
                 if sec:
-                    sec_cap = max_sector_pct * buying_power
+                    sec_cap = max_sector_pct * sector_reference
                     sec_after = sector_used.get(sec, 0.0) + required
                     if sec_after > sec_cap:
                         reason = (
                             f"sector cap: {sec} would use ${sec_after:,.0f} "
                             f"(cap ${sec_cap:,.0f}, "
-                            f"{max_sector_pct*100:.0f}% of BP)"
+                            f"{max_sector_pct*100:.0f}% of allocation)"
                         )
                         rejections.append({"trade": trade, "reason": reason})
                         EventsRepo.log(project_id, "Guardrail", "RISK", {
