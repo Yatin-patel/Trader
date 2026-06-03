@@ -83,7 +83,20 @@ def risk_guardrail_node(state: dict[str, Any]) -> dict[str, Any]:
         EventsRepo.log(project_id, "Guardrail", "ERROR", {"err": str(e)})
         return {"risk_clearance": False, "guardrail_actions": actions}
 
-    buying_power = account["buying_power"]
+    # Use options_buying_power for CSP collateral — that's the real pool
+    # Alpaca will check at order submission. Regular buying_power can be
+    # ~2x larger due to Reg-T margin which DOESN'T apply to short puts.
+    # If the field is 0 (Alpaca sometimes hides it on small accounts), fall
+    # back to cash; both per-ticker concentration and total cap then use
+    # the same number.
+    options_bp = float(account.get("options_buying_power") or 0)
+    cash_bp = float(account.get("cash") or 0)
+    margin_bp = float(account.get("buying_power") or 0)
+    # Effective BP for CSP gating: prefer options_bp, fall back to cash.
+    effective_bp = options_bp if options_bp > 0 else cash_bp
+    # Keep the legacy variable name for the rest of the function so the
+    # per-ticker concentration logic works unchanged.
+    buying_power = effective_bp
     proposed = state.get("selected_trades") or []
     approved: list[dict[str, Any]] = []
 

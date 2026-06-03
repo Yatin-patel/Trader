@@ -150,10 +150,11 @@ def prune_old_backups() -> dict[str, Any]:
 def list_backups(limit: int = 20) -> list[dict[str, Any]]:
     with session_scope() as s:
         rows = s.execute(text("""
-            SELECT TOP (:lim) backup_id, started_at, completed_at, status,
-                              path, size_bytes, error_message
+            SELECT backup_id, started_at, completed_at, status,
+                   path, size_bytes, error_message
             FROM backup_log
             ORDER BY backup_id DESC
+            LIMIT :lim
         """), {"lim": int(limit)}).fetchall()
     return [{
         "backup_id": int(r[0]),

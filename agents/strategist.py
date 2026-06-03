@@ -171,6 +171,44 @@ def _existing_phase(project_id: str, ticker: str, equity_positions: dict[str, di
     return "NONE"
 
 
+def _recently_failed_tickers(project_id: str,
+                             window_minutes: int = 60) -> set[str]:
+    """Return tickers that hit Executor.EXECUTE ERROR within the window.
+
+    Used by the Strategist to suppress re-picking a trade whose order
+    keeps getting rejected by the broker (insufficient BP, halted symbol,
+    rejected strike, etc.). Without this the same broken trade burns one
+    Alpaca API call every cycle until the underlying condition changes.
+    """
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=window_minutes)
+    failed: set[str] = set()
+    try:
+        events = EventsRepo.recent(project_id, limit=80)
+    except Exception:
+        return failed
+    for e in events:
+        if e.get("node_name") != "Executor":
+            continue
+        ts = e.get("created_at")
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts < cutoff:
+            continue
+        payload = e.get("payload") or {}
+        for r in (payload.get("results") or []):
+            status = str(r.get("status") or "").upper()
+            if status not in ("ERROR", "REJECTED"):
+                continue
+            trade = r.get("trade") or {}
+            tk = trade.get("ticker")
+            if tk:
+                failed.add(tk.upper())
+    return failed
+
+
 def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
     project_id = state["project_id"]
     tickers: list[str] = state.get("target_tickers", []) or []
@@ -231,9 +269,34 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
         if hit:
             blocking_event = label
 
+    # Tickers whose most-recent order submission failed at the broker
+    # within the last hour. Re-picking them just burns Alpaca API calls.
+    recent_fail_minutes = int(ProjectSettings.get(
+        project_id, "recent_failure_skip_minutes", default=60) or 0)
+    failed_tickers: set[str] = set()
+    if recent_fail_minutes > 0:
+        failed_tickers = _recently_failed_tickers(
+            project_id, window_minutes=recent_fail_minutes)
+
     for ticker in tickers:
         try:
             phase = _existing_phase(project_id, ticker, equity_positions)
+
+            # Recent broker-side failure on this ticker — back off.
+            if ticker.upper() in failed_tickers:
+                rejections.append({"ticker": ticker,
+                                   "reason": f"recent execution failure "
+                                             f"(skipping for {recent_fail_minutes} min)"})
+                EventsRepo.log(project_id, "Strategist", "SELECTION", {
+                    "ticker": ticker, "outcome": "recent_failure_skip",
+                    "narrative": [
+                        f"Skipping {ticker}: a previous order submission "
+                        f"for this underlying was rejected by the broker "
+                        f"in the last {recent_fail_minutes} minute(s). "
+                        "Not retrying until the cooldown elapses.",
+                    ],
+                })
+                continue
 
             # Market-wide economic event gate: blocks ALL new positions
             # in the days leading up to FOMC / CPI / NFP. Applies even

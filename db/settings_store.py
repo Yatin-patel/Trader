@@ -210,6 +210,7 @@ class ProjectSettings:
         "skip_on_cpi_days":              (True,    "bool",   "Apply the economic-event filter for CPI release days (8:30am ET surprise)"),
         "skip_on_nfp_days":              (True,    "bool",   "Apply the economic-event filter for NFP / jobs report Fridays"),
         "skip_on_pce_days":              (False,   "bool",   "Apply the economic-event filter for PCE inflation. Off by default — smaller market impact than CPI/FOMC."),
+        "recent_failure_skip_minutes":   (60,      "int",    "Skip any ticker whose most-recent order submission was rejected by the broker (insufficient BP, halted symbol, etc.) within this many minutes. 0 = always retry."),
         "loop_interval_seconds":         (60,      "int",    "Seconds between scan->execute cycles for this project (overrides global)"),
         "order_time_in_force":           ("day",   "string", "Default time-in-force for submitted orders"),
         "strategy_mode":                 ("wheel", "string", "What this project trades: 'wheel' (CSP+CC options income — default), 'wheel_plus_dca' (options + scheduled stock buys), 'dca_only' (long-term stock accumulation, no options), 'paused' (don't trade — for manual review). Day-trading and multi-leg spreads are not yet implemented."),

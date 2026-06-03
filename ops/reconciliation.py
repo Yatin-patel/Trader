@@ -145,10 +145,11 @@ def run_reconciliation(project_id: str, *, auto_sync: bool | None = None) -> dic
 def list_recon_history(project_id: str, limit: int = 20) -> list[dict[str, Any]]:
     with session_scope() as s:
         rows = s.execute(text("""
-            SELECT TOP (:lim) recon_id, ran_at, mismatches, auto_sync, details
+            SELECT recon_id, ran_at, mismatches, auto_sync, details
             FROM reconciliation_log
             WHERE project_id = :p
             ORDER BY ran_at DESC
+            LIMIT :lim
         """), {"p": project_id, "lim": int(limit)}).fetchall()
     out = []
     for r in rows:

@@ -105,13 +105,14 @@ def list_orders(project_id: str, *, limit: int = 100,
         where.append("terminal = :t")
         params["t"] = 1 if terminal else 0
     sql = (
-        "SELECT TOP (:lim) order_id, alpaca_order_id, symbol, side,"
+        "SELECT order_id, alpaca_order_id, symbol, side,"
         " order_type, qty, limit_price, status, filled_qty,"
         " filled_avg_price, submitted_at, last_polled_at, terminal,"
         " last_error "
         "FROM orders "
         f"WHERE {' AND '.join(where)} "
-        "ORDER BY order_id DESC"
+        "ORDER BY order_id DESC "
+        "LIMIT :lim"
     )
     with session_scope() as s:
         rows = s.execute(text(sql), params).fetchall()
