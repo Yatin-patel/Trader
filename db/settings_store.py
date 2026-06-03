@@ -205,7 +205,7 @@ class ProjectSettings:
         "min_iv_rank":                   (0.0,     "float",  "Skip tickers whose 1-year realized-vol rank is below this (0 = disabled)"),
         "news_sentiment_filter":         (True,    "bool",   "Skip tickers with strongly negative recent news sentiment (uses Alpaca News + VADER for instant scoring)"),
         "news_sentiment_min":            (-0.50,   "float",  "Block when the worst headline's VADER compound score is below this (-1..+1). Default -0.5 blocks on moderately-negative-or-worse headlines."),
-        "skip_event_days_within":        (3,       "int",    "Block new option positions when a major economic event (FOMC/CPI/NFP) falls within this many calendar days. 0 = disabled."),
+        "skip_event_days_within":        (1,       "int",    "Block new option positions when a major economic event (FOMC/CPI/NFP) falls within this many calendar days. Default 1 = block only on T-1 and T (i.e. the day before and day of the release). 0 = disabled, 3 = very conservative."),
         "skip_on_fomc_days":             (True,    "bool",   "Apply the economic-event filter for FOMC rate decisions (binary vol)"),
         "skip_on_cpi_days":              (True,    "bool",   "Apply the economic-event filter for CPI release days (8:30am ET surprise)"),
         "skip_on_nfp_days":              (True,    "bool",   "Apply the economic-event filter for NFP / jobs report Fridays"),
