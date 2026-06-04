@@ -11,6 +11,10 @@ logs/
 .idea/
 .vscode/
 .DS_Store
+# Claude Code session scratchpad — probe / deploy / one-shot scripts.
+# Not application code or runtime state. Lives on disk for retrospective
+# debugging but stays out of git.
+.claude/
 *.egg-info/
 dist/
 build/
