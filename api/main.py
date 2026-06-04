@@ -927,9 +927,64 @@ async def api_close_contract(request: Request, project_id: str, contract_id: int
 
 
 @app.post("/api/projects/{project_id}/contracts/{contract_id}/roll")
-async def api_roll_contract(project_id: str, contract_id: int):
-    """Buy back the contract; Strategist will reopen on next cycle."""
-    return await api_close_contract(project_id, contract_id)
+async def api_roll_contract(request: Request, project_id: str,
+                            contract_id: int):
+    """Manual single-contract roll: buy back the contract at mid AND log
+    an AutoRoll.CLOSE_FOR_ROLL marker so the next Strategist cycle picks
+    the ticker back up and writes a fresh contract at the configured
+    delta/DTE band. Reuses the same BTC flow as /close — the difference
+    is the event signal that tells the Strategist this was a roll, not
+    an outright close."""
+    from db.repositories import WheelRepo
+    from execution import AlpacaClient
+    from risk.greeks_agg import _extract_underlying
+    project = _scoped_project(project_id, request)
+    target = None
+    for c in WheelRepo.list_open(project_id):
+        if c["contract_id"] == contract_id:
+            target = c
+            break
+    if target is None:
+        raise HTTPException(404, "Contract not found or already closed")
+    client = AlpacaClient(project)
+    sym = target["option_symbol"]
+    if not sym:
+        raise HTTPException(400, "Contract has no option symbol")
+    chain = client.option_chain_quotes(_extract_underlying(sym))
+    q = chain.get(sym) or {}
+    bid = q.get("bid") or 0
+    ask = q.get("ask") or 0
+    if ask <= 0:
+        raise HTTPException(400, "no ask price available")
+    mid = (bid + ask) / 2
+    qty = int(target.get("quantity") or 1)
+    try:
+        order = client.submit_limit_option(
+            option_symbol=sym, qty=qty, side="buy",
+            limit_price=round(mid, 2),
+        )
+        # Use the AutoRoll node name so existing recent-failure /
+        # cycle-attribution logic groups manual rolls with automatic
+        # ones. The 'manual' flag on the payload distinguishes the two
+        # for the activity-feed humanizer.
+        EventsRepo.log(project_id, "AutoRoll", "CLOSE_FOR_ROLL", {
+            "ticker": target["ticker"],
+            "option_symbol": sym,
+            "qty": qty,
+            "close_price": round(mid, 2),
+            "manual": True,
+            "roll_reason": "user_requested",
+            "order": order,
+            "narrative": [
+                f"User rolled {target['ticker']} {sym} at ${mid:.2f} "
+                f"for {qty} contract(s). The next Strategist cycle will "
+                f"select a fresh contract on this ticker at the "
+                f"configured delta/DTE band."
+            ],
+        })
+        return {"ok": True, "order": order, "close_price": round(mid, 2)}
+    except Exception as e:
+        raise HTTPException(400, f"roll failed: {e}")
 
 
 @app.post("/api/projects/{project_id}/positions/{position_id}/close")

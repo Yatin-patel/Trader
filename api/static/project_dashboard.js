@@ -289,6 +289,17 @@
     const r = await fetch(`/api/projects/${projectIdEnc}/contracts/${cid}/close`, { method: "POST" });
     if (r.ok) { tick(); toast.ok("Close submitted"); } else toast.error("Close failed");
   }
+  async function rollContract(cid, label) {
+    if (!await confirmModal(
+        `Roll ${label}? Buys back this contract; the Strategist will write a fresh one on its next cycle.`,
+        { title: "Roll contract", okLabel: "Roll", danger: false })) return;
+    const r = await fetch(`/api/projects/${projectIdEnc}/contracts/${cid}/roll`, { method: "POST" });
+    if (r.ok) { tick(); toast.ok("Roll submitted — Strategist will reopen next cycle"); }
+    else {
+      const err = await r.json().catch(() => ({ detail: r.statusText }));
+      toast.error("Roll failed: " + (err.detail || r.statusText));
+    }
+  }
   async function closeAlpacaSymbol(symbol) {
     if (!await confirmModal(`Close Alpaca position ${symbol}? Submits a market order.`,
         { title: "Close position", okLabel: "Close" })) return;
@@ -318,14 +329,30 @@
     return { root, expiration: `${y}-${mo}-${d}`, right, strike };
   }
 
+  // Classify a short option by |delta| at entry into a risk bucket.
+  // Used to colour-code the ticker pill on the Open Option Contracts row.
+  function riskClass(deltaAtEntry) {
+    const d = Math.abs(Number(deltaAtEntry) || 0);
+    if (d === 0) return "risk-safe";          // unknown -> assume safe
+    if (d < 0.30) return "risk-safe";
+    if (d < 0.50) return "risk-watch";
+    return "risk-itm";
+  }
+
+  function _daysBetween(isoDate) {
+    if (!isoDate) return null;
+    const d = new Date(String(isoDate).slice(0, 10) + "T00:00:00Z");
+    if (isNaN(d.getTime())) return null;
+    const now = new Date();
+    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    return Math.round((d - today) / 86400000);
+  }
+
   function renderContracts(snap) {
     const tbody = document.querySelector("#contracts-table tbody");
     const dbContracts = snap.contracts || [];
     const liveOpts = (snap.positions_live || []).filter(p => p.asset_class === "us_option");
 
-    // Build a unified row list, indexed by option_symbol.
-    // DB-tracked rows carry contract_id and strategy_phase; live-only rows
-    // get filled from the OCC symbol.
     const dbBySym = {};
     dbContracts.forEach(c => { if (c.option_symbol) dbBySym[c.option_symbol] = c; });
     const liveBySym = {};
@@ -337,7 +364,7 @@
     ]);
 
     if (!allSymbols.size) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">No open contracts</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" class="empty">No open contracts</td></tr>';
       return;
     }
 
@@ -350,26 +377,76 @@
       const phase = (c && c.strategy_phase)
         || (occ.right === "Put" ? "CSP" : occ.right === "Call" ? "CC" : "—");
       const strike = (c && c.strike_price) || occ.strike;
-      const premium = c ? c.premium_collected
-        : (lp ? Math.abs(lp.avg_entry_price * 100) : null);
-      const expiration = (c && c.expiration_date) || occ.expiration || "—";
+      // Original credit = premium_collected * 100 * qty (dollars).
+      const qty = (c && c.quantity) || 1;
+      const premPerShare = c ? Number(c.premium_collected) : null;
+      const credit = (premPerShare != null) ? premPerShare * 100 * qty
+                   : (lp ? Math.abs(Number(lp.cost_basis) || 0) : null);
+      // Current BTC cost = absolute market value of the SHORT position.
+      const btcNow = lp ? Math.abs(Number(lp.market_value) || 0) : null;
+      // Realized-if-closed-now P/L
+      const pl = (credit != null && btcNow != null) ? credit - btcNow : null;
+      // % of max profit captured (1.0 = all premium kept)
+      const pctCapt = (credit && credit > 0 && pl != null) ? (pl / credit) : null;
+      const expiration = (c && c.expiration_date) || occ.expiration || null;
+      const dte = expiration ? _daysBetween(expiration) : null;
       const tracked = !!c;
+      const rcls = riskClass(c && c.delta_at_entry);
+
       const closeBtn = tracked
         ? `<button class="btn small danger" data-close-contract="${c.contract_id}" data-label="${escapeHtml(ticker + ' ' + phase)}">Close</button>`
         : `<button class="btn small danger" data-close-symbol="${escapeHtml(sym)}" title="Untracked — closes via Alpaca">Close*</button>`;
-      rows.push({ ticker, sym, phase, strike, premium, expiration, tracked, closeBtn });
+      const rollBtn = tracked
+        ? `<button class="btn small ghost" data-roll-contract="${c.contract_id}" data-label="${escapeHtml(ticker + ' ' + phase)}" title="Buy-to-close; Strategist reopens on next cycle">Roll</button>`
+        : "";
+      rows.push({
+        ticker, sym, phase, strike, qty, credit, btcNow, pl, pctCapt,
+        expiration, dte, tracked, closeBtn, rollBtn, rcls,
+      });
     });
 
-    rows.sort((a, b) => a.ticker.localeCompare(b.ticker));
+    rows.sort((a, b) => {
+      // ITM/at-risk first, then by DTE ascending.
+      const order = { "risk-itm": 0, "risk-watch": 1, "risk-safe": 2 };
+      const oa = order[a.rcls] ?? 3;
+      const ob = order[b.rcls] ?? 3;
+      if (oa !== ob) return oa - ob;
+      return (a.dte ?? 9999) - (b.dte ?? 9999);
+    });
+
+    const fmtPL = (v) => {
+      if (v == null) return "—";
+      const sign = v > 0 ? "+" : "";
+      return sign + fmtMoney(v);
+    };
+    const fmtPct = (v) => {
+      if (v == null) return "—";
+      return (v * 100).toFixed(1) + "%";
+    };
+    const plClass = (v) => v == null ? "" : (v > 0 ? "pl-pos" : v < 0 ? "pl-neg" : "");
+    const dteClass = (d) => {
+      if (d == null) return "";
+      if (d <= 2) return "pl-neg";
+      if (d <= 7) return "risk-watch";
+      return "";
+    };
 
     tbody.innerHTML = rows.map(r => `
       <tr>
-        <td><strong>${escapeHtml(r.ticker)}</strong>${r.tracked ? "" : ' <span class="muted" title="Open on Alpaca but not tracked in DB">∗</span>'}</td>
+        <td>
+          <span class="risk-pill ${r.rcls}" title="Assignment risk by |delta| at entry">&nbsp;</span>
+          <strong>${escapeHtml(r.ticker)}</strong>${r.tracked ? "" : ' <span class="muted" title="Open on Alpaca but not tracked in DB">∗</span>'}
+          ${r.qty > 1 ? `<span class="muted"> ×${r.qty}</span>` : ""}
+        </td>
         <td><span class="badge ghost">${escapeHtml(r.phase)}</span></td>
-        <td>${fmtMoney(r.strike)}</td>
-        <td>${r.premium != null ? fmtMoney(r.premium) : "—"}</td>
-        <td>${escapeHtml(String(r.expiration))}</td>
-        <td>${r.closeBtn}</td>
+        <td class="right">${fmtMoney(r.strike)}</td>
+        <td class="right ${dteClass(r.dte)}">${r.dte != null ? r.dte + "d" : "—"}</td>
+        <td class="right">${fmtMoney(r.credit)}</td>
+        <td class="right">${fmtMoney(r.btcNow)}</td>
+        <td class="right ${plClass(r.pl)}">${fmtPL(r.pl)}</td>
+        <td class="right ${plClass(r.pl)}">${fmtPct(r.pctCapt)}</td>
+        <td>${escapeHtml(String(r.expiration || "—"))}</td>
+        <td>${r.rollBtn} ${r.closeBtn}</td>
       </tr>
     `).join("");
 
@@ -378,6 +455,9 @@
     );
     tbody.querySelectorAll("[data-close-symbol]").forEach(b =>
       b.addEventListener("click", () => closeAlpacaSymbol(b.dataset.closeSymbol))
+    );
+    tbody.querySelectorAll("[data-roll-contract]").forEach(b =>
+      b.addEventListener("click", () => rollContract(b.dataset.rollContract, b.dataset.label))
     );
   }
 

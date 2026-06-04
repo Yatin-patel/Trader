@@ -89,12 +89,46 @@
 
   <!-- Contracts -->
   <section class="panel">
-    <header class="panel-head"><h2>Open Option Contracts</h2></header>
+    <header class="panel-head">
+      <h2>Open Option Contracts</h2>
+      <span class="muted" style="font-size:12px;">
+        Risk: <span class="risk-pill risk-safe">safe</span>
+        <span class="risk-pill risk-watch">watch</span>
+        <span class="risk-pill risk-itm">at-risk</span>
+        — by |Δ| at entry
+      </span>
+    </header>
     <table class="data" id="contracts-table">
-      <thead><tr><th>Ticker</th><th>Phase</th><th>Strike</th><th>Premium</th><th>Expiration</th><th></th></tr></thead>
-      <tbody><tr><td colspan="6" class="empty">No open contracts</td></tr></tbody>
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Phase</th>
+          <th class="right">Strike</th>
+          <th class="right">DTE</th>
+          <th class="right">Credit</th>
+          <th class="right">BTC now</th>
+          <th class="right">P/L</th>
+          <th class="right">% capt</th>
+          <th>Expiration</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="10" class="empty">No open contracts</td></tr></tbody>
     </table>
   </section>
+  <style>
+    /* Tighter contracts table */
+    #contracts-table th.right, #contracts-table td.right {
+      text-align: right; font-variant-numeric: tabular-nums;
+    }
+    .risk-pill {
+      display: inline-block; padding: 0 6px; border-radius: 4px;
+      font-size: 11px; line-height: 16px; margin-right: 4px;
+    }
+    .risk-safe  { background: #d1fae5; color: #065f46; }
+    .risk-watch { background: #fef3c7; color: #92400e; }
+    .risk-itm   { background: #fee2e2; color: #991b1b; }
+  </style>
 </div>
 
 <!-- Timeline -->
@@ -210,5 +244,5 @@
   })();
 </script>
 
-<script src="/static/project_dashboard.js?v=6"></script>
+<script src="/static/project_dashboard.js?v=7"></script>
 {% endblock %}
