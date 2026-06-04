@@ -374,20 +374,54 @@
       const lp = liveBySym[sym];
       const occ = parseOcc(sym) || {};
       const ticker = (c && c.ticker) || occ.root || sym;
-      const phase = (c && c.strategy_phase)
+      // Alpaca returns position qty as SIGNED — negative = short (we sold
+      // the option, the wheel-strategy default), positive = long (we BOUGHT
+      // the option, not a CSP). Use the sign as source-of-truth, since the
+      // DB row can drift away from reality (e.g. NIO marked CSP in DB but
+      // actually held long on Alpaca).
+      const aqty = lp ? Number(lp.qty) : null;
+      const isLong = aqty != null && aqty > 0;
+      const isShort = aqty != null && aqty < 0;
+      const absQty = aqty != null ? Math.abs(aqty)
+                                  : ((c && c.quantity) || 1);
+      // Phase label: prefer DB but mark "(LONG)" if the live position
+      // disagrees with the wheel-strategy short-side assumption.
+      let phase = (c && c.strategy_phase)
         || (occ.right === "Put" ? "CSP" : occ.right === "Call" ? "CC" : "—");
+      if (isLong) phase = (occ.right === "Call" ? "Long Call" : "Long Put");
+      else if (!c && isShort) {
+        phase = (occ.right === "Call" ? "Short Call" : "Short Put");
+      }
       const strike = (c && c.strike_price) || occ.strike;
-      // Original credit = premium_collected * 100 * qty (dollars).
-      const qty = (c && c.quantity) || 1;
-      const premPerShare = c ? Number(c.premium_collected) : null;
-      const credit = (premPerShare != null) ? premPerShare * 100 * qty
-                   : (lp ? Math.abs(Number(lp.cost_basis) || 0) : null);
-      // Current BTC cost = absolute market value of the SHORT position.
+      const avgEntry = lp ? Number(lp.avg_entry_price) : null;
+      // Credit:
+      //   * Tracked & short: DB premium_collected * 100 * qty
+      //   * Untracked & short: avg_entry_price * 100 * |qty|
+      //   * Long:    no credit (we PAID to enter, not received) -> null
+      let credit = null;
+      if (isLong) {
+        credit = null;
+      } else if (c && c.premium_collected != null) {
+        credit = Number(c.premium_collected) * 100 * absQty;
+      } else if (avgEntry != null && absQty) {
+        credit = avgEntry * 100 * absQty;
+      }
+      // Current value: |market_value| from Alpaca. For shorts this is
+      // the cost to buy back; for longs it's the dollar value of holding.
       const btcNow = lp ? Math.abs(Number(lp.market_value) || 0) : null;
-      // Realized-if-closed-now P/L
-      const pl = (credit != null && btcNow != null) ? credit - btcNow : null;
-      // % of max profit captured (1.0 = all premium kept)
-      const pctCapt = (credit && credit > 0 && pl != null) ? (pl / credit) : null;
+      // P/L: Alpaca's unrealized_pl is already signed correctly for both
+      // shorts and longs, so use it directly when available; fall back to
+      // credit-minus-btc only when we don't have the live position.
+      const livePL = lp && lp.unrealized_pl != null
+        ? Number(lp.unrealized_pl) : null;
+      const pl = livePL != null
+        ? livePL
+        : (credit != null && btcNow != null ? credit - btcNow : null);
+      const baseForPct = isLong
+        ? (avgEntry != null && absQty ? avgEntry * 100 * absQty : null)
+        : credit;
+      const pctCapt = (baseForPct && baseForPct > 0 && pl != null)
+        ? (pl / baseForPct) : null;
       const expiration = (c && c.expiration_date) || occ.expiration || null;
       const dte = expiration ? _daysBetween(expiration) : null;
       const tracked = !!c;
@@ -396,12 +430,14 @@
       const closeBtn = tracked
         ? `<button class="btn small danger" data-close-contract="${c.contract_id}" data-label="${escapeHtml(ticker + ' ' + phase)}">Close</button>`
         : `<button class="btn small danger" data-close-symbol="${escapeHtml(sym)}" title="Untracked — closes via Alpaca">Close*</button>`;
-      const rollBtn = tracked
+      // Roll only makes sense for SHORT wheel-strategy contracts. Hide
+      // it for long positions and untracked rows (no contract_id).
+      const rollBtn = (tracked && !isLong)
         ? `<button class="btn small ghost" data-roll-contract="${c.contract_id}" data-label="${escapeHtml(ticker + ' ' + phase)}" title="Buy-to-close; Strategist reopens on next cycle">Roll</button>`
         : "";
       rows.push({
-        ticker, sym, phase, strike, qty, credit, btcNow, pl, pctCapt,
-        expiration, dte, tracked, closeBtn, rollBtn, rcls,
+        ticker, sym, phase, strike, qty: absQty, credit, btcNow, pl, pctCapt,
+        expiration, dte, tracked, closeBtn, rollBtn, rcls, isLong, isShort,
       });
     });
 
