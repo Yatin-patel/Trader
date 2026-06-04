@@ -453,6 +453,12 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
                     "strike": chosen["strike"],
                     "expiration": chosen["expiration"].isoformat() if isinstance(chosen["expiration"], date) else str(chosen["expiration"]),
                     "delta": chosen.get("delta"),
+                    # Pass real vega + iv from the quote so the Guardrail's
+                    # net-vega cap math uses live greeks instead of the
+                    # 0.10*underlying fallback (which over-estimated short-
+                    # put vega by ~50x and caused false vega-cap rejections).
+                    "vega": chosen.get("vega"),
+                    "iv": chosen.get("iv"),
                     "premium": chosen.get("bid") or chosen.get("mid"),
                     "underlying_price": snap.last_price,
                     "rationale": decision.get("rationale", ""),
@@ -538,6 +544,8 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
                     "strike": chosen["strike"],
                     "expiration": chosen["expiration"].isoformat() if isinstance(chosen["expiration"], date) else str(chosen["expiration"]),
                     "delta": chosen.get("delta"),
+                    "vega": chosen.get("vega"),
+                    "iv": chosen.get("iv"),
                     "premium": chosen.get("bid") or chosen.get("mid"),
                     "underlying_price": snap.last_price,
                     "rationale": decision.get("rationale", ""),
@@ -578,6 +586,8 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
                             "strike": c["strike"],
                             "expiration": c["expiration"].isoformat() if isinstance(c["expiration"], date) else str(c["expiration"]),
                             "delta": q.get("delta"),
+                            "vega": q.get("vega"),
+                            "iv": q.get("iv"),
                             "premium": mid,
                             "underlying_price": snap.last_price,
                             "rationale": f"pyramid rung #{added + 1} of {pyramid_n} (+{(added * spacing)*100:.1f}%)",
