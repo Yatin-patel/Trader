@@ -122,6 +122,29 @@ class MultiTenantRunner:
             sched.add_job(_recon_tick, "interval", minutes=recon_min,
                           id="reconciliation", replace_existing=True)
 
+        # ---- Continuous Optimizer Agent (every N minutes) ---------
+        # Runs intelligence/recommendations against each active project
+        # on a fixed cadence. When the project has
+        # ``optimizer_auto_apply=True``, safe changes get auto-applied;
+        # otherwise the recommendation stays pending for human review
+        # in /intelligence. Interval is configurable globally via
+        # AppSettings 'optimizer_interval_minutes' (default 30, 0 to
+        # disable).
+        async def _optimizer_tick():
+            try:
+                from intelligence.optimizer_agent import run_all_active
+                await asyncio.to_thread(run_all_active)
+            except Exception as ex:
+                logger.exception("optimizer tick error: %s", ex)
+        try:
+            opt_min = int(AppSettings.get(
+                "optimizer_interval_minutes", 30) or 30)
+        except Exception:
+            opt_min = 30
+        if opt_min > 0:
+            sched.add_job(_optimizer_tick, "interval", minutes=opt_min,
+                          id="optimizer_agent", replace_existing=True)
+
         # ---- Deep position reconciliation (twice daily) -----------
         # The 15-min light pass above only detects PRESENCE mismatches
         # (DB has it / broker doesn't, or vice versa). It does NOT catch

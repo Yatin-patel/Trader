@@ -57,6 +57,14 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
         "You are an options-wheel parameter tuner. Look at the user's last "
         "30 days of P&L attribution and current settings. Suggest ONE or TWO "
         "specific parameter changes that should improve risk-adjusted return.\n"
+        "\nIMPORTANT: respect the user's stated trading_plan in the payload. "
+        "If trading_plan='conservative', do NOT suggest higher deltas, "
+        "shorter DTE, lower IV-rank floors, or loosened risk caps — pick "
+        "changes that reduce variance even at the cost of premium. If "
+        "trading_plan='aggressive', it's OK to push the other direction. "
+        "If trading_plan='balanced', pick the change with the best "
+        "Sharpe/sortino tradeoff. Never propose changing trading_plan, "
+        "strategy_mode, or dry_run — those encode user intent.\n"
         "\nRules:\n"
         "- Return ONLY raw JSON. No markdown fences, no commentary before "
         "or after.\n"
@@ -86,11 +94,20 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
         "close_at_profit_pct": "0..1 (e.g. 0.50 = 50% of max profit)",
         "min_iv_rank": "0..1 (e.g. 0.30 means 30th percentile)",
     }
+    # The user picks a trading_plan ('conservative' / 'balanced' /
+    # 'aggressive') as their stated risk identity for this project.
+    # Surface it to the LLM so suggested changes don't fight the
+    # user's intent (e.g. don't recommend an aggressive delta on a
+    # conservative project). The Optimizer's safety rails then
+    # enforce step size based on the same plan.
+    trading_plan = str(ProjectSettings.get(
+        project_id, "trading_plan", default="balanced") or "balanced")
     payload = {
         "metrics_30d": metrics,
         "attribution_by_delta": by_delta,
         "attribution_by_dte": by_dte,
         "current_settings": settings,
+        "trading_plan": trading_plan,
         "tunable_keys": _TUNABLE,
         "param_scales": param_scales,
     }

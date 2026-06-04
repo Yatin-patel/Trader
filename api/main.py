@@ -1485,6 +1485,61 @@ async def api_recon_history(request: Request, project_id: str, limit: int = 20):
     return list_recon_history(project_id, limit=limit)
 
 
+# ---------- Auto-tune: classify + apply account-tier preset ---------------
+
+class _AutoTuneIn(BaseModel):
+    tier: str | None = None    # explicit override; None = auto-detect
+    overwrite: bool = True     # False = only fill in unset keys
+
+
+@app.get("/api/projects/{project_id}/auto_tune/preview")
+async def api_auto_tune_preview(request: Request, project_id: str):
+    """What tier would auto-tune classify this project as, and what
+    settings would change? Read-only."""
+    _scoped_project(project_id, request)
+    from analytics.account_tier import (
+        TIER_PRESETS, detect_tier_for_project,
+    )
+    tier = await asyncio.to_thread(detect_tier_for_project, project_id)
+    preset = TIER_PRESETS.get(tier, {})
+    # What would change vs current
+    diff: list[dict[str, Any]] = []
+    for k, v in preset.items():
+        current = ProjectSettings.get(project_id, k, default=None)
+        if current != v:
+            diff.append({"key": k, "current": current, "proposed": v})
+    return {"tier": tier, "preset_size": len(preset), "diff": diff}
+
+
+# ---------- Optimizer Agent: manual trigger ------------------------------
+
+@app.post("/api/projects/{project_id}/optimizer/run_now")
+async def api_optimizer_run_now(request: Request, project_id: str):
+    """Manually fire the Optimizer Agent against this project. Builds an
+    LLM recommendation; if optimizer_auto_apply=True AND the proposed
+    changes pass the safety rails, applies them. Audit events:
+    Optimizer.AUTO_APPLY or Optimizer.REVIEW_REQUIRED."""
+    _scoped_project(project_id, request)
+    from intelligence.optimizer_agent import run_for_project
+    return await asyncio.to_thread(run_for_project, project_id)
+
+
+@app.post("/api/projects/{project_id}/auto_tune")
+async def api_auto_tune(request: Request, project_id: str,
+                        payload: _AutoTuneIn):
+    """Classify the account size and apply the matching tier preset to
+    project_settings. Detect-and-apply by default; pass ``tier`` to
+    force a specific tier; pass ``overwrite=false`` to gently fill
+    only unset keys."""
+    _scoped_project(project_id, request)
+    from analytics.account_tier import apply_tier
+    result = await asyncio.to_thread(
+        apply_tier, project_id, payload.tier,
+        overwrite=payload.overwrite,
+    )
+    return result
+
+
 @app.post("/api/projects/{project_id}/reconciliation/run")
 async def api_recon_run(request: Request, project_id: str,
                         auto_sync: bool = False, deep_sync: bool = False):
