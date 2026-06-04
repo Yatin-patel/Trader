@@ -52,12 +52,48 @@ def execute_orders_node(state: dict[str, Any]) -> dict[str, Any]:
         "contracts_per_csp":  ProjectSettings.get(project_id, "contracts_per_csp"),
     }
 
+    # Caches one fresh broker account snapshot per cycle for the BP
+    # recheck below. The Guardrail's BP value comes from earlier in
+    # the cycle and can be stale by the time we reach this point —
+    # e.g. an earlier trade in this same cycle consumed all the BP.
+    _live_account: dict[str, Any] | None = None
+
+    def _live_options_bp() -> float:
+        nonlocal _live_account
+        if _live_account is None:
+            try:
+                _live_account = client.get_account()
+            except Exception:
+                _live_account = {}
+        try:
+            return float(_live_account.get("options_buying_power") or 0)
+        except Exception:
+            return 0.0
+
     for trade in trades:
         try:
             if trade["type"] == "CSP":
                 if dry_run:
                     results.append({"trade": trade, "status": "DRY_RUN", "qty": csp_qty})
                 else:
+                    # Defensive BP check right before submission. The
+                    # Guardrail saw a snapshot from the start of the
+                    # cycle; if an earlier trade in this same cycle
+                    # consumed the available BP, Alpaca would reject
+                    # with 40310000. Catch it here and surface as a
+                    # routine REJECTED rather than a system ERROR.
+                    required = float(trade["strike"]) * 100.0 * csp_qty
+                    live_bp = _live_options_bp()
+                    if live_bp > 0 and required > live_bp:
+                        results.append({
+                            "trade": trade, "status": "REJECTED",
+                            "reason": (
+                                f"live options BP exhausted: required "
+                                f"${required:,.0f}, available "
+                                f"${live_bp:,.0f}"
+                            ),
+                        })
+                        continue
                     order = client.submit_limit_option(
                         option_symbol=trade["option_symbol"],
                         qty=csp_qty,
@@ -189,8 +225,49 @@ def execute_orders_node(state: dict[str, Any]) -> dict[str, Any]:
                     results.append({"trade": trade, "status": "SUBMITTED", "order": order})
 
         except Exception as e:
-            results.append({"trade": trade, "status": "ERROR", "err": str(e)})
-            logger.exception("execute trade failed: %s", trade)
+            err_text = str(e)
+            # Classify broker rejections as REJECTED, not ERROR.
+            # Alpaca returns JSON with a "code":4XXXXXXX number for any
+            # business-rule rejection (insufficient BP, conflicting
+            # position, halted symbol, market closed for that asset
+            # class, etc.). These are NOT system errors — they're the
+            # broker saying "no". Showing them as ERROR×N on the
+            # dashboard creates alert fatigue and makes real bugs
+            # harder to spot.
+            is_broker_rejection = (
+                '"code":4' in err_text
+                or 'insufficient' in err_text.lower()
+                or 'cannot open' in err_text.lower()
+                or 'halted' in err_text.lower()
+                or 'market_closed' in err_text.lower()
+            )
+            if is_broker_rejection:
+                # Try to pull a human-readable reason out of the JSON.
+                reason = err_text[:200]
+                try:
+                    import json as _json
+                    import re as _re
+                    m = _re.search(r'\{.*\}', err_text)
+                    if m:
+                        body = _json.loads(m.group(0))
+                        reason = (body.get("message")
+                                  or body.get("error")
+                                  or reason)
+                except Exception:
+                    pass
+                results.append({
+                    "trade": trade, "status": "REJECTED",
+                    "reason": str(reason)[:300],
+                })
+                # Don't burn a full ERROR-level log on a routine
+                # broker NO. Info-level keeps it in the activity
+                # feed for debugging without raising alarm.
+                logger.info("broker rejected trade %s: %s",
+                            trade.get("ticker"), reason)
+            else:
+                results.append({"trade": trade, "status": "ERROR",
+                                "err": err_text})
+                logger.exception("execute trade failed: %s", trade)
 
     exec_payload = {"results": results, "dry_run": dry_run}
     EventsRepo.log(project_id, "Executor", "EXECUTE", exec_payload)

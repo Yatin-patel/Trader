@@ -233,7 +233,19 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
     max_contracts = ProjectSettings.get(project_id, "max_open_contracts")
 
     client = AlpacaClient(project)
-    equity_positions = {p["symbol"]: p for p in client.list_positions() if p["asset_class"] == "us_equity"}
+    live_positions = client.list_positions()
+    equity_positions = {p["symbol"]: p for p in live_positions
+                        if p["asset_class"] == "us_equity"}
+    # Set of OCC option symbols currently held at the broker, regardless
+    # of side (long or short). If we'd open the exact same contract,
+    # Alpaca rejects with "cannot open a short sell while a long buy
+    # order is open" (or vice versa). Catching it here avoids the
+    # 4xx and the ERROR×1 banner that follows.
+    broker_held_options: set[str] = {
+        str(p.get("symbol") or "").upper()
+        for p in live_positions
+        if p.get("asset_class") != "us_equity"
+    }
 
     open_contracts = WheelRepo.list_open(project_id)
     if len(open_contracts) >= max_contracts:
@@ -392,6 +404,20 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
                                                          csp_min_dte, csp_max_dte,
                                                          min_strike=min_strike,
                                                          max_strike=max_strike)
+                # Drop any contract the broker is ALREADY holding (in
+                # either direction). Alpaca rejects a new short against
+                # an existing long on the same OCC symbol with a
+                # "cannot open a short sell while a long buy order is
+                # open" 4xx; catching it here keeps the error off the
+                # activity feed and lets the Strategist pick a different
+                # strike on the same ticker.
+                conflict_drops = [c for c in contracts
+                                  if str(c.get("symbol") or "").upper()
+                                  in broker_held_options]
+                if conflict_drops:
+                    contracts = [c for c in contracts
+                                 if str(c.get("symbol") or "").upper()
+                                 not in broker_held_options]
                 if not contracts:
                     rejections.append({"ticker": ticker, "reason": "no put contracts in DTE window"})
                     EventsRepo.log(project_id, "Strategist", "SELECTION", {
@@ -481,6 +507,11 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
                                                          csp_min_dte, csp_max_dte,
                                                          min_strike=min_strike,
                                                          max_strike=max_strike)
+                # Drop any OCC symbol already held at the broker (same
+                # rationale as the CSP branch above).
+                contracts = [c for c in contracts
+                             if str(c.get("symbol") or "").upper()
+                             not in broker_held_options]
                 if not contracts:
                     rejections.append({"ticker": ticker, "reason": "no call contracts in DTE window"})
                     EventsRepo.log(project_id, "Strategist", "SELECTION", {
