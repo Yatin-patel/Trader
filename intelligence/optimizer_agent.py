@@ -40,6 +40,56 @@ logger = logging.getLogger(__name__)
 
 MAX_AUTO_APPLIES_PER_CYCLE = 2
 
+# After a Manual.SETTING_CHANGE on a given key, the Optimizer must leave
+# that key alone for this many hours. Stops the "I tuned X 5 minutes ago
+# and now it's back" problem we saw when the LLM kept proposing
+# min_iv_rank changes that undid the user's manual setting.
+MANUAL_CHANGE_COOLDOWN_HOURS = 24
+
+
+def _recent_manual_change(project_id: str, key: str,
+                          hours: float) -> tuple[bool, str | None]:
+    """Did the user manually change ``key`` within the last ``hours``?
+    Returns (was_recent, when_iso_or_none).
+
+    NB: uses a direct SQL query rather than ``EventsRepo.recent``.
+    Active projects can log 500+ events/hour (Scanner SCAN, Strategist
+    SELECTION ×N, Guardrail RISK ×N, Worker LOOP every 2 min, etc.), so
+    a count-bounded fetch only reaches back ~20 minutes and misses the
+    Manual.SETTING_CHANGE row we're looking for. The (project_id,
+    created_at DESC) index on agent_events makes the time-filtered
+    query fast.
+    """
+    from datetime import datetime, timedelta, timezone
+    import json as _json
+    from sqlalchemy import text as _text
+    from db.connection import session_scope
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+    try:
+        with session_scope() as s:
+            rows = s.execute(_text("""
+                SELECT created_at, payload FROM agent_events
+                WHERE project_id = :p
+                  AND node_name = 'Manual'
+                  AND event_type = 'SETTING_CHANGE'
+                  AND created_at > :c
+                ORDER BY created_at DESC
+                LIMIT 50
+            """), {"p": project_id, "c": cutoff}).fetchall()
+    except Exception:
+        return (False, None)
+    for r in rows:
+        try:
+            pl = _json.loads(r[1]) if r[1] else {}
+        except Exception:
+            continue
+        if pl.get("key") == key:
+            ts = r[0]
+            return (True, ts.isoformat() if hasattr(ts, "isoformat")
+                    else str(ts))
+    return (False, None)
+
+
 # Settings the Optimizer NEVER auto-applies — these encode the user's
 # stated intent for the project and changing them silently would be a
 # trust violation. trading_plan in particular is the project's risk
@@ -86,14 +136,26 @@ _AUTO_APPLY_BOUNDS: dict[str, tuple[float, float]] = {
 }
 
 def _safe_to_apply(key: str, old: Any, new: Any,
-                   max_rel_step: float) -> tuple[bool, str]:
+                   max_rel_step: float,
+                   project_id: str | None = None) -> tuple[bool, str]:
     """Return (ok, reason_if_blocked). Applies clamp + step-size + type
-    rules to one proposed change. ``max_rel_step`` is derived from the
-    project's trading_plan (conservative/balanced/aggressive)."""
+    rules + 24-hour manual-change cooldown to one proposed change.
+    ``max_rel_step`` is derived from the project's trading_plan
+    (conservative/balanced/aggressive)."""
     if key in _PROTECTED_KEYS:
         return (False, f"{key} is project intent — never auto-changed")
     if key not in _AUTO_APPLY_BOUNDS:
         return (False, f"{key} is not in the auto-apply whitelist")
+    # Manual-change cooldown: if the user touched this key recently,
+    # leave it alone so the LLM can't quietly roll back their decision.
+    if project_id is not None:
+        recent, ts = _recent_manual_change(
+            project_id, key, MANUAL_CHANGE_COOLDOWN_HOURS)
+        if recent:
+            return (False, (
+                f"user manually changed {key} at {ts}; respecting "
+                f"{MANUAL_CHANGE_COOLDOWN_HOURS}h cooldown"
+            ))
     lo, hi = _AUTO_APPLY_BOUNDS[key]
     try:
         n = float(new)
@@ -153,7 +215,8 @@ def run_for_project(project_id: str) -> dict[str, Any]:
     rejections: list[dict[str, Any]] = []
     for k, v in list(changes.items())[:MAX_AUTO_APPLIES_PER_CYCLE]:
         current = ProjectSettings.get(project_id, k, default=None)
-        ok, reason = _safe_to_apply(k, current, v, max_rel_step)
+        ok, reason = _safe_to_apply(k, current, v, max_rel_step,
+                                     project_id=project_id)
         if not ok:
             rejections.append({"key": k, "value": v,
                                "current": current, "reason": reason})

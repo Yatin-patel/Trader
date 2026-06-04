@@ -2520,9 +2520,29 @@ async def api_list_project_settings(request: Request, project_id: str):
 
 
 @app.post("/api/projects/{project_id}/settings")
-async def api_set_project_setting(request: Request, project_id: str, payload: ProjectSettingIn):
+async def api_set_project_setting(request: Request, project_id: str,
+                                  payload: ProjectSettingIn):
+    """Persist one setting AND emit a Manual.SETTING_CHANGE audit event.
+
+    The audit event matters for the Optimizer Agent's 24-hour manual-
+    change cooldown — when the user explicitly sets a value via the UI,
+    the LLM should leave that key alone for a day so the user's
+    intentional choice isn't quietly reverted on the next tick."""
     _scoped_project(project_id, request)
-    ProjectSettings.set(project_id, payload.key, payload.value, value_type=payload.value_type)
+    before = ProjectSettings.get(project_id, payload.key, default=None)
+    ProjectSettings.set(project_id, payload.key, payload.value,
+                        value_type=payload.value_type)
+    after = ProjectSettings.get(project_id, payload.key, default=None)
+    if before != after:
+        EventsRepo.log(project_id, "Manual", "SETTING_CHANGE", {
+            "key": payload.key,
+            "before": before, "after": after,
+            "value_type": payload.value_type,
+            "narrative": [
+                f"User changed {payload.key}: {before} -> {after}. "
+                f"Optimizer will respect a 24h cooldown on this key."
+            ],
+        })
     return {"ok": True}
 
 

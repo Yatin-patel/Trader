@@ -128,6 +128,45 @@ def humanize_event(event: dict[str, Any]) -> dict[str, Any]:
     elif node == "Admin" and et == "RESET_PAPER":
         icon, kind = "💰", "admin"
         message = f"Reset paper account to {_fmt_money(payload.get('cash', 0))}"
+    elif node == "Optimizer" and et == "AUTO_APPLY":
+        applied = payload.get("applied") or {}
+        title = payload.get("title") or ""
+        icon, kind = "🤖", "admin"
+        if applied:
+            bits = ", ".join(f"{k}={v}" for k, v in applied.items())
+            message = (
+                f"Optimizer auto-applied "
+                f"{len(applied)} change(s): {bits}"
+                + (f" — {title}" if title else "")
+            )
+        else:
+            message = f"Optimizer ran: {title or 'no changes'}"
+    elif node == "Optimizer" and et == "REVIEW_REQUIRED":
+        title = payload.get("title") or ""
+        rejs = payload.get("rejections") or []
+        icon, kind = "🛟", "guardrail"
+        message = (
+            f"Optimizer suggested {len(rejs)} change(s) blocked by safety "
+            f"rails — pending human review on Intelligence"
+            + (f" — {title}" if title else "")
+        )
+    elif node == "Manual" and et == "SETTING_CHANGE":
+        key = payload.get("key", "?")
+        before = payload.get("before")
+        after = payload.get("after")
+        icon, kind = "✏️", "admin"
+        message = f"You changed {key}: {before} → {after}"
+    elif node == "Manual" and et == "AUTO_TUNE":
+        tier = payload.get("tier", "?")
+        n = len(payload.get("applied") or [])
+        icon, kind = "🎚️", "admin"
+        message = f"Auto-tuned to '{tier}' tier ({n} settings updated)"
+    elif node == "Manual" and et == "DB_OVERRIDE":
+        action = payload.get("action", "?")
+        ticker = payload.get("ticker") or ""
+        icon, kind = "🛠️", "admin"
+        message = (f"Manual override: {action} "
+                   + (f"on {ticker}" if ticker else ""))
     elif et == "ERROR":
         icon, kind = "❌", "error"
         message = f"Error in {node}: {payload.get('err', 'unknown')}"
