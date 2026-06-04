@@ -8,6 +8,13 @@
       <h1>Account</h1>
       <span class="muted">{{ current_user.email }}</span>
     </div>
+    {% if current_user.is_admin %}
+    <div>
+      <a class="btn small primary" href="/admin/users/pending">
+        Review pending users{% if pending_count %} ({{ pending_count }}){% endif %}
+      </a>
+    </div>
+    {% endif %}
   </header>
 </section>
 

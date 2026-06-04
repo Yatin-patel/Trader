@@ -232,6 +232,24 @@ async def login_submit(request: Request,
             "email": email,
         }, status_code=401)
 
+    # Account-status gate. is_active mirrors account_status='active'
+    # in the DB, but we read account_status to give the user a more
+    # helpful message than the generic 'disabled' one.
+    if user.account_status == "pending":
+        return templates.TemplateResponse("login.html", {
+            "request": request,
+            "error": ("Your account is still under review. You'll be "
+                      "notified by email as soon as it's approved."),
+            "email": email,
+        }, status_code=401)
+    if user.account_status == "rejected":
+        # Don't reveal that the email exists in a rejected state — same
+        # message as the signup endpoint uses for the same reason.
+        return templates.TemplateResponse("login.html", {
+            "request": request,
+            "error": "Invalid email or password.",
+            "email": email,
+        }, status_code=401)
     if not user.is_active:
         return templates.TemplateResponse("login.html", {
             "request": request,
@@ -422,8 +440,14 @@ async def signup_submit(request: Request,
         err = "Passwords do not match."
     elif "@" not in email or "." not in email:
         err = "Please enter a valid email."
-    elif UsersRepo.get_by_email(email) is not None:
-        err = "An account with this email already exists."
+    else:
+        existing = UsersRepo.get_by_email(email)
+        if existing is not None:
+            # Show the same message for "already pending" / "already
+            # active" / "previously rejected" so this endpoint doesn't
+            # become an account-status oracle. Rejected emails are
+            # permanently blocked.
+            err = "An account with this email cannot be registered."
 
     if err:
         return templates.TemplateResponse("signup.html", {
@@ -432,11 +456,18 @@ async def signup_submit(request: Request,
 
     # First user becomes admin automatically AND inherits any pre-existing
     # projects that have no owner yet (the bootstrap migration path).
-    is_admin = UsersRepo.count() == 0
+    # Admins are auto-activated (account_status='active') — there's
+    # nobody to approve the first user. All subsequent signups land in
+    # 'pending' for admin review.
+    is_first = UsersRepo.count() == 0
     user = UsersRepo.create(
-        email=email, password_hash=hash_password(password), is_admin=is_admin,
+        email=email,
+        password_hash=hash_password(password),
+        is_admin=is_first,
+        account_status="active" if is_first else "pending",
+        is_active=is_first,
     )
-    if is_admin:
+    if is_first:
         from sqlalchemy import text as _sql_text
         from db.connection import session_scope as _scope
         with _scope() as s:
@@ -445,20 +476,136 @@ async def signup_submit(request: Request,
                 "WHERE user_id IS NULL"
             ), {"u": user.user_id})
             s.commit()
-    ip = request.client.host if request.client else None
-    ua = request.headers.get("user-agent")
-    token, _ = create_session(user.user_id, ip=ip, user_agent=ua)
+        # Bootstrap path — auto-login the first admin.
+        ip = request.client.host if request.client else None
+        ua = request.headers.get("user-agent")
+        token, _ = create_session(user.user_id, ip=ip, user_agent=ua)
+        resp = RedirectResponse("/dashboard", status_code=303)
+        resp.set_cookie(key=SESSION_COOKIE, value=token,
+                        httponly=True, samesite="lax",
+                        secure=request.url.scheme == "https")
+        return resp
 
-    resp = RedirectResponse("/dashboard", status_code=303)
-    # No max_age — browser drops the cookie when the window closes.
-    # Server-side session still lasts SESSION_TTL_HOURS as a safety upper
-    # bound, but in practice the cookie is gone the moment the user quits.
-    resp.set_cookie(
-        key=SESSION_COOKIE, value=token,
-        httponly=True, samesite="lax",
-        secure=request.url.scheme == "https",
-    )
-    return resp
+    # --- Standard signup: send 2 emails, redirect to login. ----------
+    try:
+        from auth.approval_emails import (
+            notify_admin_pending, notify_user_pending,
+        )
+        base = str(request.base_url).rstrip("/")
+        approval_url = f"{base}/admin/users/pending"
+        for admin in UsersRepo.list_admins():
+            ok, msg = notify_admin_pending(admin.email, user.email,
+                                            approval_url)
+            if not ok:
+                logger.warning("admin pending email failed for %s: %s",
+                               admin.email, msg)
+        ok, msg = notify_user_pending(user.email)
+        if not ok:
+            logger.warning("user pending email failed for %s: %s",
+                           user.email, msg)
+    except Exception:
+        logger.exception("approval email pipeline crashed on signup")
+
+    EventsRepo.log(None, "Auth", "SIGNUP_PENDING", {
+        "user_id": user.user_id, "email": user.email,
+        "narrative": [
+            f"New user {user.email} signed up; awaiting admin review."
+        ],
+    })
+    return RedirectResponse("/login?pending=true", status_code=303)
+
+
+# ---------- Admin: user approval queue ------------------------------------
+
+def _require_admin(request: Request) -> Any:
+    user = getattr(request.state, "user", None)
+    if user is None:
+        raise HTTPException(401, "auth required")
+    if not user.is_admin:
+        raise HTTPException(403, "admin only")
+    return user
+
+
+@app.get("/admin/users/pending", response_class=HTMLResponse)
+async def admin_pending_page(request: Request,
+                              msg: str | None = None,
+                              error: str | None = None):
+    user = getattr(request.state, "user", None)
+    if user is None:
+        return RedirectResponse("/login?next=/admin/users/pending",
+                                status_code=303)
+    if not user.is_admin:
+        raise HTTPException(403, "admin only")
+    pending = UsersRepo.list_pending()
+    return templates.TemplateResponse("admin_users.html", {
+        "request": request,
+        "pending_users": pending,
+        "msg": msg, "error": error,
+    })
+
+
+@app.post("/admin/users/{target_user_id}/approve")
+async def admin_approve_user(request: Request, target_user_id: str):
+    _require_admin(request)
+    target = UsersRepo.get_by_id(target_user_id)
+    if target is None:
+        raise HTTPException(404, "user not found")
+    if target.account_status != "pending":
+        raise HTTPException(409,
+            f"user already {target.account_status}, not pending")
+    UsersRepo.set_status(target_user_id, "active")
+    # Send the approval email — best effort.
+    try:
+        from auth.approval_emails import notify_user_approved
+        base = str(request.base_url).rstrip("/")
+        ok, msg = notify_user_approved(target.email, f"{base}/login")
+        if not ok:
+            logger.warning("approval email failed for %s: %s",
+                           target.email, msg)
+    except Exception:
+        logger.exception("approval email pipeline crashed")
+    EventsRepo.log(None, "Auth", "ADMIN_APPROVED_USER", {
+        "user_id": target_user_id, "email": target.email,
+        "narrative": [
+            f"Admin approved user {target.email}. They can now log in."
+        ],
+    })
+    return RedirectResponse(
+        f"/admin/users/pending?msg=Approved+{target.email}",
+        status_code=303)
+
+
+@app.post("/admin/users/{target_user_id}/reject")
+async def admin_reject_user(request: Request, target_user_id: str):
+    _require_admin(request)
+    target = UsersRepo.get_by_id(target_user_id)
+    if target is None:
+        raise HTTPException(404, "user not found")
+    if target.account_status != "pending":
+        raise HTTPException(409,
+            f"user already {target.account_status}, not pending")
+    UsersRepo.set_status(target_user_id, "rejected")
+    # Send the rejection email — best effort. (We don't reveal the
+    # specific reason; the email just says the application wasn't
+    # approved.)
+    try:
+        from auth.approval_emails import notify_user_rejected
+        ok, msg = notify_user_rejected(target.email)
+        if not ok:
+            logger.warning("rejection email failed for %s: %s",
+                           target.email, msg)
+    except Exception:
+        logger.exception("rejection email pipeline crashed")
+    EventsRepo.log(None, "Auth", "ADMIN_REJECTED_USER", {
+        "user_id": target_user_id, "email": target.email,
+        "narrative": [
+            f"Admin rejected user {target.email}. The email is "
+            f"permanently blocked from re-registering."
+        ],
+    })
+    return RedirectResponse(
+        f"/admin/users/pending?msg=Rejected+{target.email}",
+        status_code=303)
 
 
 @app.post("/logout")
@@ -512,6 +659,10 @@ async def account_page(request: Request,
         user_id=None if is_admin else user.user_id
     )
 
+    # Surface pending-user count to admins so the Review button on the
+    # /account page can show the queue depth.
+    pending_count = len(UsersRepo.list_pending()) if is_admin else 0
+
     return templates.TemplateResponse("account.html", {
         "request": request,
         "active_sessions": active,
@@ -523,6 +674,7 @@ async def account_page(request: Request,
         "totp_secret": None,
         "default_broker": _get_default_broker(user.user_id),
         "accessible_projects": accessible_projects,
+        "pending_count": pending_count,
     })
 
 

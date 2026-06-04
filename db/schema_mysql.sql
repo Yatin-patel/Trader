@@ -367,14 +367,19 @@ CREATE TABLE IF NOT EXISTS users (
     email           VARCHAR(256) NOT NULL,
     password_hash   VARCHAR(512) NOT NULL,
     display_name    VARCHAR(128) NULL,
-    is_active       TINYINT(1) NOT NULL DEFAULT 1,
+    is_active       TINYINT(1) NOT NULL DEFAULT 0,
     is_admin        TINYINT(1) NOT NULL DEFAULT 0,
     totp_enabled    TINYINT(1) NOT NULL DEFAULT 0,
     totp_secret     VARCHAR(64) NULL,
     email_verified  TINYINT(1) NOT NULL DEFAULT 0,
+    -- 'pending' | 'active' | 'rejected'. New signups land in 'pending'
+    -- and only an admin can flip them to 'active'. 'rejected' is
+    -- permanent (the signup endpoint refuses re-registration).
+    account_status  VARCHAR(16) NOT NULL DEFAULT 'pending',
     created_at      DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     last_login_at   DATETIME(6) NULL,
-    UNIQUE INDEX UX_users_email (email)
+    UNIQUE INDEX UX_users_email (email),
+    INDEX IX_users_status (account_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 24. Refresh tokens

@@ -1,0 +1,65 @@
+{% extends "_layout.html" %}
+{% block title %}Admin · Pending users{% endblock %}
+{% block content %}
+<section class="panel">
+  <header class="panel-head">
+    <div>
+      <h1>Pending User Approvals</h1>
+      <span class="muted">New signups awaiting your review.</span>
+    </div>
+  </header>
+  {% if msg %}
+  <div class="alert ok" style="margin: 12px 24px;">
+    <div class="alert-detail">{{ msg }}</div>
+  </div>
+  {% endif %}
+  {% if error %}
+  <div class="alert error" style="margin: 12px 24px;">
+    <div class="alert-detail">{{ error }}</div>
+  </div>
+  {% endif %}
+
+  {% if pending_users %}
+  <table class="data" style="margin-top: 12px;">
+    <thead>
+      <tr>
+        <th>Email</th>
+        <th>Signed up</th>
+        <th style="text-align: right;">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for u in pending_users %}
+      <tr>
+        <td><strong>{{ u.email }}</strong></td>
+        <td>{{ u.created_at.strftime("%Y-%m-%d %H:%M UTC") if u.created_at else "—" }}</td>
+        <td style="text-align: right; white-space: nowrap;">
+          <form method="post"
+                action="/admin/users/{{ u.user_id }}/approve"
+                style="display: inline;">
+            <button type="submit" class="btn small primary">Approve</button>
+          </form>
+          <form method="post"
+                action="/admin/users/{{ u.user_id }}/reject"
+                style="display: inline; margin-left: 6px;"
+                onsubmit="return confirm('Reject {{ u.email }}? This is permanent — the email cannot re-register.');">
+            <button type="submit" class="btn small danger">Reject</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted" style="padding: 24px;">
+    No pending users. New signups will appear here automatically.
+  </p>
+  {% endif %}
+
+  <p class="muted" style="padding: 16px 24px; font-size: 12px;">
+    Approve unlocks the account immediately and emails the user with a
+    link to sign in. Reject is permanent — the email is blocked from
+    re-registering and the user is notified by email.
+  </p>
+</section>
+{% endblock %}

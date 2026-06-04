@@ -32,6 +32,15 @@
           </div>
         </div>
         {% endif %}
+        {% if request.query_params.get('pending') == 'true' %}
+        <div class="alert info">
+          <div class="alert-detail">
+            Thanks for signing up. Your account is under review by an
+            administrator. You'll receive an email as soon as it's
+            approved or rejected.
+          </div>
+        </div>
+        {% endif %}
         {% if error %}
         <div class="alert error">
           <div class="alert-detail">{{ error }}</div>
