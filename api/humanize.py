@@ -144,15 +144,44 @@ def humanize_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def summarize_pipeline(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Pick the latest event for each pipeline node so the UI can render its state."""
+    """Pick the latest event for each pipeline node so the UI can render
+    its state.
+
+    Special case: the Executor node only runs when Guardrail approves at
+    least one trade. When Guardrail blocks every trade, the user sees
+    "Executor: Waiting" (or a stale OK from a prior cycle) with no
+    indication that this cycle was decided + blocked. We post-process the
+    Executor node to synthesize a "Blocked by Guardrail: ..." summary
+    when the latest Guardrail decision in the current cycle approved 0
+    trades and includes per-trade rejection reasons.
+    """
     nodes = {
         "Scanner":    {"status": "idle", "summary": "Waiting", "ts": None, "kind": "pending"},
         "Strategist": {"status": "idle", "summary": "Waiting", "ts": None, "kind": "pending"},
         "Guardrail":  {"status": "idle", "summary": "Waiting", "ts": None, "kind": "pending"},
         "Executor":   {"status": "idle", "summary": "Waiting", "ts": None, "kind": "pending"},
     }
+    latest_executor_ts: Any = None
+    latest_guardrail_final: dict[str, Any] | None = None
+    guardrail_rejections: list[dict[str, Any]] = []
+
     for e in events:  # events come newest-first
         n = e.get("node_name")
+        et = e.get("event_type")
+        payload = e.get("payload") or {}
+        if isinstance(payload, dict) and n == "Guardrail" and et == "RISK":
+            # Final summary: has approved_trades key. Per-trade rejection:
+            # has rejected + reason keys.
+            if "approved_trades" in payload and latest_guardrail_final is None:
+                latest_guardrail_final = {**e, "payload": payload}
+            elif "rejected" in payload and "reason" in payload:
+                # Only collect rejections from the most recent cycle —
+                # i.e. those that fall in the same time bucket as the
+                # latest_guardrail_final. We accept any rejection newer
+                # than the last Executor execution.
+                guardrail_rejections.append({**e, "payload": payload})
+        if n == "Executor" and et == "EXECUTE" and latest_executor_ts is None:
+            latest_executor_ts = e.get("created_at")
         if n in nodes and nodes[n]["ts"] is None:
             h = humanize_event(e)
             nodes[n] = {
@@ -160,5 +189,54 @@ def summarize_pipeline(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]
                 "summary": h["message"],
                 "ts": h["created_at"],
                 "kind": h["kind"],
+            }
+
+    # Surface "Blocked by Guardrail" on the Executor card when this cycle
+    # never reached the executor.
+    if (latest_guardrail_final is not None
+            and not (latest_guardrail_final["payload"].get("approved_trades") or [])):
+        gts = latest_guardrail_final.get("created_at")
+        # Newer than the last Executor.EXECUTE event? Then this cycle was
+        # decided + blocked and the executor sat out.
+        gts_newer = (latest_executor_ts is None) or (
+            gts is not None and gts > latest_executor_ts
+        )
+        if gts_newer:
+            # Collect per-trade rejection reasons captured in the same
+            # cycle (i.e. newer than the last Executor.EXECUTE).
+            relevant = [
+                r for r in guardrail_rejections
+                if (latest_executor_ts is None
+                    or (r.get("created_at") is not None
+                        and r["created_at"] > latest_executor_ts))
+            ]
+            # Dedupe by ticker — repeated cycles all reject the same
+            # trades for the same reason. Showing each ticker once is
+            # the useful signal.
+            bits: list[str] = []
+            seen_tickers: set[str] = set()
+            for r in relevant:
+                pl = r.get("payload") or {}
+                rj = pl.get("rejected") or {}
+                tk = (rj.get("ticker") or "?").upper()
+                if tk in seen_tickers:
+                    continue
+                seen_tickers.add(tk)
+                reason = (pl.get("reason") or "").split(":")[0].strip()
+                if reason:
+                    bits.append(f"{tk} ({reason})")
+                else:
+                    bits.append(tk)
+                if len(bits) >= 4:
+                    break
+            if not bits:
+                msg = "Blocked by Guardrail this cycle — no approved trades"
+            else:
+                msg = "Blocked by Guardrail: " + ", ".join(bits)
+            nodes["Executor"] = {
+                "status": "active",
+                "summary": msg,
+                "ts": gts,
+                "kind": "guardrail-alert",
             }
     return nodes

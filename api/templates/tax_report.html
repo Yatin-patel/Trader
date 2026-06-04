@@ -1,0 +1,121 @@
+{% extends "_layout.html" %}
+{% block title %}{{ project.project_name }} · Tax Report{% endblock %}
+{% block content %}
+<section class="panel" data-project-id="{{ project.project_id }}" id="tax-root"
+         data-selected-year="{{ selected_year }}">
+  <header class="panel-head">
+    <div>
+      <h1>Capital Gains / Tax Report</h1>
+      <span class="muted">
+        <a href="/projects/{{ project.project_id }}">← back to dashboard</a>
+        &nbsp;·&nbsp; {{ project.project_name }}
+      </span>
+    </div>
+    <div class="status-bar">
+      <label class="muted" style="font-size:12px;">
+        Tax year
+        <select id="tax-year">
+          {% for y in year_options %}
+            <option value="{{ y }}" {% if y == selected_year %}selected{% endif %}>{{ y }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <a class="btn small primary"
+         id="tax-csv-link"
+         href="/api/projects/{{ project.project_id }}/tax_report/form_8949.csv?year={{ selected_year }}">
+        Download Form 8949 CSV
+      </a>
+    </div>
+  </header>
+  <p class="muted small" style="padding:8px 4px;">
+    Includes both stock-lot consumptions (FIFO basis) and short-option
+    premium realized via expiration / buy-to-close / stop-out. Premium on
+    ASSIGNED options is excluded here — IRS rules fold it into the
+    underlying stock's basis instead. <strong>Informational, not tax
+    advice.</strong> Wash-sale, specific-identification, and Section 1256
+    rules are not applied. Consult a tax professional before filing.
+  </p>
+</section>
+
+<!-- Summary cards -->
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Short-term realized P&amp;L</div>
+    <div class="card-value" id="card-st">—</div>
+    <div class="card-sub muted" id="card-st-sub">taxed as ordinary income</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Long-term realized P&amp;L</div>
+    <div class="card-value" id="card-lt">—</div>
+    <div class="card-sub muted" id="card-lt-sub">preferential cap-gains rate</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Total realized P&amp;L</div>
+    <div class="card-value" id="card-total">—</div>
+    <div class="card-sub muted" id="card-total-year"></div>
+  </div>
+  <div class="card">
+    <div class="card-label">Tickers w/ activity</div>
+    <div class="card-value" id="card-tickers">—</div>
+  </div>
+</section>
+
+<!-- Source breakdown -->
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Options · short-term</div>
+    <div class="card-value" id="card-opt-st">—</div>
+    <div class="card-sub muted">premium kept on expired / closed shorts</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Options · long-term</div>
+    <div class="card-value" id="card-opt-lt">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Stock · short-term</div>
+    <div class="card-value" id="card-stk-st">—</div>
+    <div class="card-sub muted">FIFO from share lots held &le; 365 days</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Stock · long-term</div>
+    <div class="card-value" id="card-stk-lt">—</div>
+  </div>
+</section>
+
+<!-- By-ticker breakdown -->
+<section class="panel">
+  <header class="panel-head">
+    <h2>By Ticker</h2>
+    <span class="muted">short vs long term, grouped by underlying</span>
+  </header>
+  <table class="data" id="tax-by-ticker">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th class="right">Short-term P/L</th>
+        <th class="right">Long-term P/L</th>
+        <th class="right">Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td colspan="4" class="empty">No closed lots for this year yet.</td></tr>
+    </tbody>
+    <tfoot>
+      <tr>
+        <th>Totals</th>
+        <th class="right" id="foot-st">—</th>
+        <th class="right" id="foot-lt">—</th>
+        <th class="right" id="foot-total">—</th>
+      </tr>
+    </tfoot>
+  </table>
+</section>
+
+<style>
+  th.right, td.right { text-align: right; font-variant-numeric: tabular-nums; }
+  .pl-pos { color: #16a34a; }
+  .pl-neg { color: #dc2626; }
+</style>
+
+<script src="/static/tax_report.js?v=1"></script>
+{% endblock %}

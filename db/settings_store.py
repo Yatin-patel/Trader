@@ -263,6 +263,88 @@ class ProjectSettings:
             s.commit()
 
     @classmethod
+    def export_all(cls, project_id: str) -> dict[str, Any]:
+        """Snapshot every setting for a project (overrides + defaults) into
+        a JSON-serializable dict.
+
+        Returned shape:
+            {"schema_version": 1,
+             "project_id": "<pid>",
+             "exported_at": "<UTC ISO timestamp>",
+             "settings": {key: {"value": v, "value_type": vt}, ...}}
+
+        Includes BOTH explicitly-overridden settings and DEFAULTS so that
+        importing into a fresh project produces an identical configuration
+        even if the destination's DEFAULTS table drifts.
+        """
+        from datetime import datetime, timezone
+        rows = cls.list_for_project(project_id)
+        return {
+            "schema_version": 1,
+            "project_id": project_id,
+            "exported_at": datetime.now(tz=timezone.utc).isoformat(),
+            "settings": {
+                r.key: {"value": r.value, "value_type": r.value_type}
+                for r in rows
+            },
+        }
+
+    @classmethod
+    def import_bulk(cls, project_id: str,
+                    payload: dict[str, Any], *,
+                    overwrite: bool = True) -> dict[str, Any]:
+        """Apply a previously-exported settings dict to ``project_id``.
+
+        Accepts either the full export envelope (with ``settings`` key) or
+        a bare ``{key: value | {value, value_type}}`` mapping for
+        convenience. Unknown keys are skipped (logged) — typo-protection
+        against hand-edited files.
+
+        Returns ``{"applied": [...], "skipped": [...], "errors": [...]}``.
+        """
+        settings_in = payload.get("settings") if isinstance(payload, dict) and "settings" in payload else payload
+        if not isinstance(settings_in, dict):
+            return {"applied": [], "skipped": [],
+                    "errors": ["payload missing 'settings' object"]}
+        applied: list[str] = []
+        skipped: list[str] = []
+        errors: list[str] = []
+        for key, raw in settings_in.items():
+            if key not in cls.DEFAULTS:
+                skipped.append(key)
+                continue
+            try:
+                if isinstance(raw, dict) and "value" in raw:
+                    value = raw["value"]
+                    vt = raw.get("value_type") or cls.DEFAULTS[key][1]
+                else:
+                    value = raw
+                    vt = cls.DEFAULTS[key][1]
+                if not overwrite:
+                    existing = cls.get(project_id, key, default=None)
+                    if existing is not None:
+                        skipped.append(key)
+                        continue
+                cls.set(project_id, key, value, value_type=vt)
+                applied.append(key)
+            except Exception as e:
+                errors.append(f"{key}: {e}")
+        return {"applied": applied, "skipped": skipped, "errors": errors}
+
+    @classmethod
+    def clone_from(cls, source_project_id: str,
+                   dest_project_id: str, *,
+                   overwrite: bool = True) -> dict[str, Any]:
+        """Copy every setting from one project to another. Server-only —
+        no file leaves the box."""
+        if source_project_id == dest_project_id:
+            return {"applied": [], "skipped": [],
+                    "errors": ["source and destination are the same"]}
+        snapshot = cls.export_all(source_project_id)
+        return cls.import_bulk(dest_project_id, snapshot,
+                               overwrite=overwrite)
+
+    @classmethod
     def list_for_project(cls, project_id: str) -> list[SettingRow]:
         with session_scope() as s:
             rows = s.execute(

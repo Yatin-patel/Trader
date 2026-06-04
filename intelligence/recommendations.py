@@ -46,7 +46,10 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
 
     from agents.llm_factory import build_llm
     from langchain_core.messages import HumanMessage, SystemMessage
-    llm = build_llm(purpose="chat", max_tokens=3500)
+    # 3500 tokens was too tight — Gemini's verbose rationales were being
+    # truncated mid-string and the parser saw no closing `}`, surfacing
+    # as "Get AI suggestions Failed: LLM returned no JSON" in the UI.
+    llm = build_llm(purpose="chat", max_tokens=6000)
     if llm is None:
         return {"error": "no LLM configured"}
 
@@ -59,6 +62,9 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
         "or after.\n"
         "- Schema: {\"title\": str, \"rationale\": str, "
         "\"changes\": {setting_key: new_value}}.\n"
+        "- KEEP RATIONALE UNDER 500 CHARACTERS. Brevity matters — a long "
+        "rationale will be truncated and the suggestion will fail to "
+        "deliver. State the cause and the expected effect in 2-3 sentences.\n"
         "- Respect parameter scales (see param_scales in payload). "
         "min_iv_rank is a FRACTION 0..1 (e.g. 0.30 not 30). Delta bounds are "
         "0..1. Percentages like max_collateral_pct are 0..1.\n"
@@ -94,15 +100,27 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
         content = resp.content if isinstance(resp.content, str) else "".join(
             getattr(c, "text", "") for c in resp.content
         )
-        start = content.find("{")
-        end = content.rfind("}")
+        # Defensive cleanup: Gemini sometimes ignores the "no markdown
+        # fences" rule and wraps the JSON in ```json ... ``` anyway. Strip
+        # any leading fence before parsing.
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            first_nl = stripped.find("\n")
+            if first_nl != -1:
+                stripped = stripped[first_nl + 1:]
+            if stripped.endswith("```"):
+                stripped = stripped[:-3]
+        start = stripped.find("{")
+        end = stripped.rfind("}")
         if start == -1 or end == -1:
-            logger.warning("recommendations: no JSON in LLM reply: %s",
-                           content[:400])
-            return {"error": "LLM returned no JSON",
-                    "raw": content[:400]}
+            logger.warning("recommendations: no JSON in LLM reply (len=%d): %s",
+                           len(content), content[:400])
+            tail = content[-200:] if len(content) > 200 else ""
+            return {"error": "LLM returned no JSON "
+                             "(reply likely truncated — try again)",
+                    "raw": (content[:300] + "..." + tail)[:600]}
         try:
-            parsed = json.loads(content[start: end + 1])
+            parsed = json.loads(stripped[start: end + 1])
         except json.JSONDecodeError as je:
             logger.warning("recommendations: JSON parse failed: %s | raw=%s",
                            je, content[:400])

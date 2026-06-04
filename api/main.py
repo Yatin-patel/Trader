@@ -6,13 +6,17 @@ runner via lifespan when started with `python main.py`.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import (
+    HTMLResponse, JSONResponse, PlainTextResponse,
+    RedirectResponse, StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -72,14 +76,14 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 # Paths that are accessible without login. Everything else gets a redirect to
 # /login (for HTML requests) or a 401 JSON response (for /api/ requests).
 _PUBLIC_PREFIXES = (
-    "/login", "/signup", "/logout",
+    "/login", "/signup", "/logout", "/forgot", "/reset/",
     "/static/", "/favicon.ico", "/metrics", "/openapi.json", "/docs", "/redoc",
 )
 
 
 def _is_public_path(path: str) -> bool:
     if path in ("/", "/login", "/signup", "/logout", "/login/2fa",
-                "/favicon.ico"):
+                "/forgot", "/favicon.ico"):
         return True
     return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
     # NOTE: /etrade/* stays AUTHENTICATED — only logged-in owners can
@@ -316,6 +320,78 @@ async def signup_page(request: Request, error: str | None = None,
     })
 
 
+# ---------------------------------------------------------------------------
+# Password reset
+# ---------------------------------------------------------------------------
+@app.get("/forgot", response_class=HTMLResponse)
+async def forgot_page(request: Request, error: str | None = None,
+                      sent: bool = False):
+    return templates.TemplateResponse("forgot.html", {
+        "request": request, "error": error, "sent": sent,
+    })
+
+
+@app.post("/forgot")
+async def forgot_submit(request: Request, email: str = Form(...)):
+    from auth.password_reset import make_reset_token, send_reset_email
+    email = email.strip().lower()
+    user = UsersRepo.get_by_email(email)
+    # ALWAYS show the same success page so we don't leak which emails
+    # are registered. Errors only happen for the SMTP-not-configured
+    # case (operator concern, not a security leak).
+    if user is not None and user.is_active:
+        token = make_reset_token(user.user_id)
+        base = str(request.base_url).rstrip("/")
+        reset_url = f"{base}/reset/{token}"
+        ok, msg = send_reset_email(user.email, reset_url)
+        if not ok:
+            # SMTP misconfigured — show the operator the issue so they
+            # can fix it. We DON'T log the URL anywhere user-visible.
+            logger.warning("reset email send failed: %s", msg)
+            return RedirectResponse(
+                f"/forgot?error={msg[:120]}", status_code=303)
+    return RedirectResponse("/forgot?sent=true", status_code=303)
+
+
+@app.get("/reset/{token}", response_class=HTMLResponse)
+async def reset_page(request: Request, token: str,
+                     error: str | None = None):
+    from auth.password_reset import consume_reset_token
+    payload = consume_reset_token(token)
+    if payload is None:
+        return templates.TemplateResponse("reset.html", {
+            "request": request, "valid": False,
+            "error": "This reset link is invalid or expired. "
+                     "Request a new one from the login page.",
+            "token": "",
+        })
+    return templates.TemplateResponse("reset.html", {
+        "request": request, "valid": True,
+        "email": payload["email"], "token": token, "error": error,
+    })
+
+
+@app.post("/reset/{token}")
+async def reset_submit(request: Request, token: str,
+                       password: str = Form(...),
+                       password_confirm: str = Form(...)):
+    from auth.password_reset import consume_reset_token, apply_new_password
+    payload = consume_reset_token(token)
+    if payload is None:
+        return RedirectResponse(
+            f"/reset/{token}?error=invalid_or_expired", status_code=303)
+    if password != password_confirm:
+        return RedirectResponse(
+            f"/reset/{token}?error=passwords_do_not_match", status_code=303)
+    ok, msg = apply_new_password(payload["user_id"], password)
+    if not ok:
+        return RedirectResponse(
+            f"/reset/{token}?error={msg[:120]}", status_code=303)
+    # On success route to /login with a friendly notice (handled by
+    # the template via the ?reset=true query param).
+    return RedirectResponse("/login?reset=true", status_code=303)
+
+
 @app.post("/signup")
 async def signup_submit(request: Request,
                         email: str = Form(...),
@@ -411,6 +487,14 @@ async def account_page(request: Request,
             "is_current": s["token"] == current_token,
         })
 
+    # Projects the caller can manage settings for. Used to populate the
+    # export / import / clone pickers in the Settings Backup & Migration
+    # panel on /account.
+    is_admin = bool(getattr(request.state, "is_admin", False))
+    accessible_projects = ProjectsRepo.list_all(
+        user_id=None if is_admin else user.user_id
+    )
+
     return templates.TemplateResponse("account.html", {
         "request": request,
         "active_sessions": active,
@@ -421,6 +505,7 @@ async def account_page(request: Request,
         "qr_data_uri": None,
         "totp_secret": None,
         "default_broker": _get_default_broker(user.user_id),
+        "accessible_projects": accessible_projects,
     })
 
 
@@ -1849,6 +1934,97 @@ async def api_capital_gains(request: Request, project_id: str,
     return capital_gains_summary(project_id, int(yr))
 
 
+# ---------- Tax report page + Form 8949 CSV -------------------------------
+
+@app.get("/projects/{project_id}/tax_report", response_class=HTMLResponse)
+async def tax_report_page(request: Request, project_id: str,
+                          year: int | None = None):
+    project = _scoped_project(project_id, request)
+    from datetime import datetime, timezone
+    current_year = datetime.now(tz=timezone.utc).year
+    selected_year = int(year) if year else current_year
+    return templates.TemplateResponse("tax_report.html", {
+        "request": request,
+        "project": project,
+        "selected_year": selected_year,
+        "year_options": list(range(current_year, current_year - 6, -1)),
+    })
+
+
+@app.get("/api/projects/{project_id}/tax_report/form_8949.csv")
+async def api_form_8949_csv(request: Request, project_id: str,
+                            year: int | None = None):
+    """Download per-lot capital-gains detail as a CSV importable into
+    TurboTax/H&R Block. One row per FIFO consumption — i.e. one Form 8949
+    line. Includes BOTH short-term and long-term rows; the ``Term``
+    column distinguishes them."""
+    _scoped_project(project_id, request)
+    import csv
+    import io
+    from datetime import datetime, timezone
+    from analytics.tax_lots import form_8949_rows, capital_gains_summary
+    yr = int(year) if year else datetime.now(tz=timezone.utc).year
+    rows = form_8949_rows(project_id, yr)
+    summary = capital_gains_summary(project_id, yr)
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        f"Form 8949 / Schedule D detail — {project_id} — tax year {yr}",
+    ])
+    w.writerow([
+        "Kind", "Description", "Date Acquired", "Date Sold",
+        "Proceeds (USD)", "Cost Basis (USD)", "Gain/Loss (USD)",
+        "Term", "Holding Days", "Ticker", "Quantity",
+        "Sale Price", "Cost Per Share",
+    ])
+    for r in rows:
+        sp = (f'{r["sale_price"]:.4f}'
+              if r.get("sale_price") is not None else "")
+        cps = (f'{r["cost_per_share"]:.4f}'
+               if r.get("cost_per_share") is not None else "")
+        w.writerow([
+            r.get("kind", ""),
+            r["description"], r["date_acquired"], r["date_sold"],
+            f'{r["proceeds"]:.2f}', f'{r["cost_basis"]:.2f}',
+            f'{r["realized_pnl"]:.2f}', r["term"].upper(),
+            r["holding_days"], r["ticker"], r["quantity"],
+            sp, cps,
+        ])
+    w.writerow([])
+    w.writerow(["SUMMARY"])
+    bd = summary.get("breakdown") or {}
+    w.writerow(["Stock — short-term (USD)",
+                f'{bd.get("stock_short_term", 0):.2f}'])
+    w.writerow(["Stock — long-term (USD)",
+                f'{bd.get("stock_long_term", 0):.2f}'])
+    w.writerow(["Options — short-term (USD)",
+                f'{bd.get("option_short_term", 0):.2f}'])
+    w.writerow(["Options — long-term (USD)",
+                f'{bd.get("option_long_term", 0):.2f}'])
+    w.writerow(["Short-term realized P&L (USD)",
+                f'{summary["short_term_total"]:.2f}'])
+    w.writerow(["Long-term realized P&L (USD)",
+                f'{summary["long_term_total"]:.2f}'])
+    w.writerow(["Total realized P&L (USD)",
+                f'{summary["grand_total"]:.2f}'])
+    w.writerow([])
+    w.writerow(["DISCLAIMER: Informational only. Wash-sale, "
+                "specific-identification, and Section 1256 rules not "
+                "applied. FIFO basis for stock. Assigned-option premium "
+                "is excluded here because IRS rules fold it into the "
+                "underlying stock basis (not a separate event). "
+                "Consult a tax professional before filing."])
+
+    safe_pid = "".join(c if c.isalnum() or c in "-_" else "_"
+                       for c in project_id)
+    fname = f"{safe_pid}_form_8949_{yr}.csv"
+    return PlainTextResponse(
+        buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 # ---------- REST: per-project settings ---------------------------------------
 
 @app.get("/api/projects/{project_id}/settings")
@@ -1864,6 +2040,68 @@ async def api_set_project_setting(request: Request, project_id: str, payload: Pr
     _scoped_project(project_id, request)
     ProjectSettings.set(project_id, payload.key, payload.value, value_type=payload.value_type)
     return {"ok": True}
+
+
+# ---------- REST: project-settings export / import / clone -----------------
+
+@app.get("/api/projects/{project_id}/settings/export")
+async def api_settings_export(request: Request, project_id: str):
+    """Download a JSON snapshot of every project setting. Streamed with a
+    Content-Disposition header so the browser saves it as a file."""
+    _scoped_project(project_id, request)
+    import io
+    snapshot = ProjectSettings.export_all(project_id)
+    buf = io.BytesIO(json.dumps(snapshot, indent=2,
+                                default=str).encode("utf-8"))
+    safe_pid = "".join(c if c.isalnum() or c in "-_" else "_"
+                       for c in project_id)
+    fname = f"{safe_pid}_settings.json"
+    return StreamingResponse(
+        buf, media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.post("/api/projects/{project_id}/settings/import")
+async def api_settings_import(
+    request: Request, project_id: str,
+    file: UploadFile = File(...),
+    overwrite: bool = True,
+):
+    """Apply a previously-exported JSON file to this project. Defaults to
+    overwriting existing values; pass ``?overwrite=false`` to merge only
+    keys that aren't already set on this project."""
+    _scoped_project(project_id, request)
+    raw = await file.read()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=400,
+                            detail=f"invalid JSON: {e}")
+    result = ProjectSettings.import_bulk(project_id, payload,
+                                         overwrite=overwrite)
+    return {"ok": True, **result}
+
+
+class _CloneSettingsIn(BaseModel):
+    source_project_id: str
+    overwrite: bool = True
+
+
+@app.post("/api/projects/{project_id}/settings/clone_from")
+async def api_settings_clone_from(request: Request, project_id: str,
+                                  payload: _CloneSettingsIn):
+    """Copy every setting from another project this user owns into this
+    project. No file leaves the server."""
+    _scoped_project(project_id, request)
+    # Caller must also own (or admin) the source project — _scoped_project
+    # raises 404 otherwise.
+    _scoped_project(payload.source_project_id, request)
+    result = ProjectSettings.clone_from(
+        payload.source_project_id, project_id,
+        overwrite=payload.overwrite,
+    )
+    return {"ok": True, **result}
 
 
 @app.get("/api/projects/{project_id}/events")
@@ -2018,6 +2256,284 @@ async def performance_page(request: Request, project_id: str):
     return templates.TemplateResponse("performance.html", {
         "request": request, "project": project,
     })
+
+
+# ---------- P&L report (dedicated printable page + CSV) ------------------
+
+def _pnl_default_range():
+    from datetime import datetime, timezone
+    now = datetime.now(tz=timezone.utc)
+    return (now.replace(month=1, day=1, hour=0, minute=0,
+                        second=0, microsecond=0), now)
+
+
+@app.get("/projects/{project_id}/pnl_report", response_class=HTMLResponse)
+async def pnl_report_page(request: Request, project_id: str,
+                          from_: str | None = None,
+                          to: str | None = None):
+    """Dedicated printable P&L report. Browser-print produces a clean
+    PDF; CSV download is a separate route."""
+    project = _scoped_project(project_id, request)
+    return templates.TemplateResponse("pnl_report.html", {
+        "request": request, "project": project,
+        "from_": from_, "to": to,
+    })
+
+
+@app.get("/api/projects/{project_id}/pnl_report")
+async def api_pnl_report(request: Request, project_id: str,
+                         from_: str | None = None,
+                         to: str | None = None):
+    """JSON aggregate for the P&L report page. Returns summary metrics
+    + monthly breakdown + closed-trade list for the date range."""
+    _scoped_project(project_id, request)
+    from datetime import datetime, timezone
+    from analytics.pnl_calculator import (
+        metrics_summary, monthly_breakdown, equity_curve_points,
+    )
+    from db.analytics_repos import (
+        ClosedContractsRepo, ClosedPositionsRepo,
+    )
+
+    default_from, default_to = _pnl_default_range()
+    fd = _parse_date_param(from_, default_from)
+    td = _parse_date_param(to, default_to, end_of_day=True)
+
+    contracts = ClosedContractsRepo.list(project_id, since=fd, limit=10000)
+    contracts = [c for c in contracts
+                 if c.get("closed_at") and _le_dt(c["closed_at"], td)]
+    stock_pnl = ClosedPositionsRepo.realized_pnl_since(project_id, fd)
+    monthly = monthly_breakdown(project_id, fd, td)
+    summary = metrics_summary(project_id, period="all")
+    # Override the period summary to reflect this date range, not "all".
+    pnl_values = [c["realized_pnl"] for c in contracts]
+    total_pnl = sum(pnl_values) + stock_pnl
+    wins = [v for v in pnl_values if v > 0]
+    losses = [v for v in pnl_values if v < 0]
+    total_premium = sum(c.get("premium_collected") or 0 for c in contracts)
+    trade_count = len(contracts)
+
+    # ---- Return-on-capital math ---------------------------------------
+    # "% gain over account funds" — the user wants to know how the
+    # period's realized P&L compares to the capital that was at risk.
+    # Three sources, in priority order:
+    #   1. Portfolio snapshot at or after the period start (real equity)
+    #   2. Earliest-ever snapshot (works for "All time" period)
+    #   3. project.max_equity_allocation (the budget; stable, never None)
+    # Whichever wins becomes ``starting_equity`` and feeds the % gain.
+    from db.analytics_repos import PortfolioSnapshotsRepo
+    starting_equity = None
+    starting_source = None
+    snap_at_fd = PortfolioSnapshotsRepo.at_or_after(project_id, fd)
+    if snap_at_fd and snap_at_fd.get("equity"):
+        starting_equity = float(snap_at_fd["equity"])
+        starting_source = "snapshot"
+    if not starting_equity:
+        earliest = PortfolioSnapshotsRepo.earliest(project_id)
+        if earliest and earliest.get("equity"):
+            starting_equity = float(earliest["equity"])
+            starting_source = "earliest_snapshot"
+    project = ProjectsRepo.get(project_id)
+    budget = float(getattr(project, "max_equity_allocation", 0) or 0)
+    if not starting_equity and budget > 0:
+        starting_equity = budget
+        starting_source = "max_equity_allocation"
+
+    pct_gain = None
+    annualized_pct = None
+    if starting_equity and starting_equity > 0:
+        pct_gain = round(total_pnl / starting_equity * 100, 2)
+        # Annualize when the period is > 14 days. Below that the figure
+        # is more noise than signal (one good week extrapolates to an
+        # absurd APR).
+        days = max(1, (td - fd).days or 1)
+        if days >= 14:
+            try:
+                annualized_pct = round(
+                    ((1 + pct_gain / 100) ** (365.0 / days) - 1) * 100, 2)
+            except Exception:
+                annualized_pct = None
+
+    period_summary = {
+        "from": fd.isoformat(),
+        "to": td.isoformat(),
+        "realized_pnl": round(total_pnl, 2),
+        "option_pnl": round(sum(pnl_values), 2),
+        "stock_pnl": round(stock_pnl, 2),
+        "total_premium": round(total_premium, 2),
+        "trade_count": trade_count,
+        "win_rate": (round(len(wins) / trade_count, 4)
+                     if trade_count else 0.0),
+        "wins": len(wins),
+        "losses": len(losses),
+        "avg_winner": round(sum(wins) / len(wins), 2) if wins else 0.0,
+        "avg_loser": round(sum(losses) / len(losses), 2) if losses else 0.0,
+        "profit_factor": (round(sum(wins) / abs(sum(losses)), 2)
+                          if losses else (None if not wins else None)),
+        "max_drawdown": summary.get("max_drawdown"),
+        "current_equity": summary.get("current_equity"),
+        "unrealized_pnl": summary.get("unrealized_pnl"),
+        "starting_equity": (round(starting_equity, 2)
+                            if starting_equity else None),
+        "starting_source": starting_source,
+        "pct_gain_on_capital": pct_gain,
+        "annualized_pct": annualized_pct,
+        "budget": round(budget, 2) if budget else None,
+    }
+    return {
+        "project_id": project_id,
+        "from": fd.isoformat(),
+        "to": td.isoformat(),
+        "summary": period_summary,
+        "monthly": monthly,
+        "closed_trades": contracts,
+    }
+
+
+@app.get("/api/projects/{project_id}/pnl_report.csv")
+async def api_pnl_report_csv(request: Request, project_id: str,
+                             from_: str | None = None,
+                             to: str | None = None):
+    """Download the full P&L report as a CSV (summary + monthly +
+    per-trade detail)."""
+    _scoped_project(project_id, request)
+    import csv
+    import io
+    from datetime import datetime, timezone
+    from analytics.pnl_calculator import monthly_breakdown
+    from db.analytics_repos import (
+        ClosedContractsRepo, ClosedPositionsRepo,
+    )
+
+    default_from, default_to = _pnl_default_range()
+    fd = _parse_date_param(from_, default_from)
+    td = _parse_date_param(to, default_to, end_of_day=True)
+    contracts = ClosedContractsRepo.list(project_id, since=fd, limit=10000)
+    contracts = [c for c in contracts
+                 if c.get("closed_at") and _le_dt(c["closed_at"], td)]
+    stock_pnl = ClosedPositionsRepo.realized_pnl_since(project_id, fd)
+    monthly = monthly_breakdown(project_id, fd, td)
+
+    pnl_values = [c["realized_pnl"] for c in contracts]
+    total_pnl = sum(pnl_values) + stock_pnl
+    wins = [v for v in pnl_values if v > 0]
+    losses = [v for v in pnl_values if v < 0]
+
+    # Same starting-equity resolution as the JSON endpoint above.
+    from db.analytics_repos import PortfolioSnapshotsRepo
+    starting_equity = None
+    starting_source = None
+    snap_at_fd = PortfolioSnapshotsRepo.at_or_after(project_id, fd)
+    if snap_at_fd and snap_at_fd.get("equity"):
+        starting_equity = float(snap_at_fd["equity"])
+        starting_source = "snapshot at period start"
+    if not starting_equity:
+        earliest = PortfolioSnapshotsRepo.earliest(project_id)
+        if earliest and earliest.get("equity"):
+            starting_equity = float(earliest["equity"])
+            starting_source = "earliest recorded equity"
+    project = ProjectsRepo.get(project_id)
+    budget = float(getattr(project, "max_equity_allocation", 0) or 0)
+    if not starting_equity and budget > 0:
+        starting_equity = budget
+        starting_source = "project budget (max_equity_allocation)"
+    pct_gain = None
+    if starting_equity and starting_equity > 0:
+        pct_gain = total_pnl / starting_equity * 100
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([f"P&L Report — {project_id} — "
+                f"{fd.date()} through {td.date()}"])
+    w.writerow([])
+    w.writerow(["SUMMARY"])
+    w.writerow(["Realized P&L (options)", f"{sum(pnl_values):.2f}"])
+    w.writerow(["Realized P&L (stock)", f"{stock_pnl:.2f}"])
+    w.writerow(["Realized P&L (total)", f"{total_pnl:.2f}"])
+    if starting_equity:
+        w.writerow(["Starting capital", f"{starting_equity:.2f}"])
+        w.writerow(["Capital reference", starting_source or ""])
+    if pct_gain is not None:
+        w.writerow(["% gain on capital", f"{pct_gain:+.2f}%"])
+    w.writerow(["Total premium captured",
+                f"{sum(c.get('premium_collected') or 0 for c in contracts):.2f}"])
+    w.writerow(["Trade count", len(contracts)])
+    w.writerow(["Wins", len(wins)])
+    w.writerow(["Losses", len(losses)])
+    w.writerow(["Win rate",
+                f"{(len(wins)/len(contracts)*100 if contracts else 0):.2f}%"])
+    if wins:
+        w.writerow(["Average winner", f"{sum(wins)/len(wins):.2f}"])
+    if losses:
+        w.writerow(["Average loser", f"{sum(losses)/len(losses):.2f}"])
+    if losses:
+        w.writerow(["Profit factor",
+                    f"{sum(wins)/abs(sum(losses)):.2f}"])
+
+    w.writerow([])
+    w.writerow(["MONTHLY BREAKDOWN"])
+    w.writerow(["Month", "Realized P&L", "Premium captured",
+                "Trades", "Wins", "Losses", "Win rate"])
+    for m in monthly:
+        w.writerow([m["month"], f'{m["realized_pnl"]:.2f}',
+                    f'{m["premium_captured"]:.2f}',
+                    m["trade_count"], m["wins"], m["losses"],
+                    f'{m["win_rate"]*100:.2f}%'])
+
+    w.writerow([])
+    w.writerow(["CLOSED TRADES"])
+    w.writerow(["Closed at", "Ticker", "Phase", "Strike", "Qty",
+                "Days held", "Premium collected", "Close cost",
+                "Realized P&L", "Reason"])
+    for c in contracts:
+        w.writerow([
+            (c.get("closed_at") or ""),
+            c.get("ticker") or "",
+            c.get("strategy_phase") or "",
+            c.get("strike_price") or "",
+            c.get("quantity") or "",
+            c.get("days_held") or "",
+            f'{(c.get("premium_collected") or 0):.4f}',
+            f'{(c.get("close_cost") or 0):.4f}',
+            f'{(c.get("realized_pnl") or 0):.4f}',
+            c.get("closure_reason") or "",
+        ])
+
+    safe_pid = "".join(ch if ch.isalnum() or ch in "-_" else "_"
+                       for ch in project_id)
+    fname = f"{safe_pid}_pnl_{fd.date()}_to_{td.date()}.csv"
+    return PlainTextResponse(
+        buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+def _parse_date_param(s, fallback, *, end_of_day: bool = False):
+    """Best-effort parse of YYYY-MM-DD; fall back to ``fallback``."""
+    from datetime import datetime, time, timezone
+    if not s:
+        return fallback
+    try:
+        d = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if end_of_day:
+            d = datetime.combine(d.date(), time(23, 59, 59),
+                                 tzinfo=timezone.utc)
+        return d
+    except Exception:
+        return fallback
+
+
+def _le_dt(maybe_dt, cutoff) -> bool:
+    """True if maybe_dt (datetime or ISO str) is <= cutoff (datetime)."""
+    from datetime import datetime, timezone
+    if isinstance(maybe_dt, str):
+        try:
+            maybe_dt = datetime.fromisoformat(maybe_dt.replace("Z", "+00:00"))
+        except Exception:
+            return True
+    if getattr(maybe_dt, "tzinfo", None) is None:
+        maybe_dt = maybe_dt.replace(tzinfo=timezone.utc)
+    return maybe_dt <= cutoff
 
 
 @app.get("/projects/{project_id}/analysis", response_class=HTMLResponse)

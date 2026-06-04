@@ -18,21 +18,35 @@
   // handled automatically by Intl.DateTimeFormat.
   const ET_TZ = "America/New_York";
   const fmtET = (d, opts) => d.toLocaleString("en-US", { timeZone: ET_TZ, ...(opts || {}) });
+  // Date-only string in ET — used to decide whether to add the date prefix.
+  const _etDate = (d) =>
+    d.toLocaleDateString("en-US", { timeZone: ET_TZ });
+  // The API returns naive UTC ISO strings from MySQL ("2026-06-03 21:00:00"
+  // or "2026-06-03T21:00:00"). Without a Z/offset suffix, `new Date(...)`
+  // interprets them as LOCAL time, which puts every timestamp ~4-5 hours
+  // off (the cause of the "-14321s ago" we saw on the Recent Activity
+  // panel). Normalise to UTC explicitly.
+  const _parseISO = (iso) => {
+    if (!iso) return null;
+    let s = String(iso);
+    if (!/[Zz]|[+-]\d{2}:?\d{2}$/.test(s)) {
+      s = s.replace(" ", "T") + "Z";
+    }
+    return new Date(s);
+  };
+  // Always renders the actual time in ET (never a relative "Xs ago" format).
+  // Same-day events: HH:MM:SS ET. Older events: include the date too.
   const fmtTime = (iso) => {
     if (!iso) return "";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return iso;
-    const now = new Date();
-    const diff = (now - d) / 1000;
-    if (diff < 60) return `${Math.floor(diff)}s ago`;
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    // Anything older than an hour: show full ET timestamp so the user
-    // can correlate with the market clock.
-    return fmtET(d, {
-      month: "short", day: "numeric",
-      hour: "2-digit", minute: "2-digit",
-      hour12: false, timeZoneName: "short",
-    });
+    const d = _parseISO(iso);
+    if (!d || isNaN(d.getTime())) return iso;
+    const today = _etDate(new Date()) === _etDate(d);
+    const base = {
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hour12: false,
+    };
+    const parts = today ? base : { month: "short", day: "numeric", ...base };
+    return fmtET(d, parts) + " ET";
   };
 
   const PIPE_NODES = ["Scanner", "Strategist", "Guardrail", "Executor"];

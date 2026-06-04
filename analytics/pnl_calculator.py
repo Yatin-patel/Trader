@@ -40,6 +40,57 @@ def _utc_start_of_year() -> datetime:
     return now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def monthly_breakdown(project_id: str, from_date: datetime,
+                      to_date: datetime) -> list[dict[str, Any]]:
+    """Return one row per calendar month between ``from_date`` and
+    ``to_date`` (inclusive). Each row has:
+        {"month": "YYYY-MM", "realized_pnl": float,
+         "premium_captured": float, "trade_count": int,
+         "wins": int, "losses": int, "win_rate": float}
+
+    Used by the P&L report page to show how each month contributed to
+    the total. Pure aggregation over closed_contracts; stock-side P&L
+    from closed_positions is added separately at the totals level (we
+    can't always attribute a closure to a specific calendar month
+    without ambiguity at month boundaries — option premiums are clearer).
+    """
+    from sqlalchemy import text
+    from db.connection import session_scope
+    if from_date.tzinfo is None:
+        from_date = from_date.replace(tzinfo=timezone.utc)
+    if to_date.tzinfo is None:
+        to_date = to_date.replace(tzinfo=timezone.utc)
+    with session_scope() as s:
+        rows = s.execute(text("""
+            SELECT DATE_FORMAT(closed_at, '%Y-%m') AS ym,
+                   COALESCE(SUM(realized_pnl), 0) AS pnl,
+                   COALESCE(SUM(premium_collected), 0) AS premium,
+                   COUNT(*) AS trades,
+                   SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) AS losses
+            FROM closed_contracts
+            WHERE project_id = :p
+              AND closed_at >= :s AND closed_at < :e
+            GROUP BY DATE_FORMAT(closed_at, '%Y-%m')
+            ORDER BY ym ASC
+        """), {"p": project_id, "s": from_date, "e": to_date}).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        trades = int(r[3] or 0)
+        wins = int(r[4] or 0)
+        losses = int(r[5] or 0)
+        out.append({
+            "month": r[0],
+            "realized_pnl": round(float(r[1] or 0), 2),
+            "premium_captured": round(float(r[2] or 0), 2),
+            "trade_count": trades,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wins / trades, 4) if trades else 0.0,
+        })
+    return out
+
+
 def metrics_summary(project_id: str, period: str = "all") -> dict[str, Any]:
     """Aggregate metrics over the requested period.
 

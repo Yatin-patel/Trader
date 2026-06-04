@@ -39,6 +39,87 @@
   </div>
 </section>
 
+<!-- Settings Backup & Migration (all projects) -->
+<section class="panel" id="settings-migration">
+  <header class="panel-head">
+    <div>
+      <h2>Settings Backup &amp; Migration</h2>
+      <span class="muted">Export, import, or clone project strategy settings across your projects.</span>
+    </div>
+  </header>
+  {% if accessible_projects %}
+  <div class="settings-migration-row">
+    <div class="settings-migration-cell">
+      <strong>Export</strong>
+      <p class="muted small">Download a JSON snapshot of every setting for the selected project. Use for backups or sharing.</p>
+      <label class="muted small">Project</label>
+      <select id="sm-export-project">
+        {% for p in accessible_projects %}
+          <option value="{{ p.project_id }}">{{ p.project_name }} ({{ p.project_id }})</option>
+        {% endfor %}
+      </select>
+      <a class="btn small primary" id="sm-export-link" href="#">Download settings JSON</a>
+    </div>
+    <div class="settings-migration-cell">
+      <strong>Import</strong>
+      <p class="muted small">Restore settings from a JSON file. Unknown keys are ignored; overwrite is on by default.</p>
+      <label class="muted small">Target project</label>
+      <select id="sm-import-project">
+        {% for p in accessible_projects %}
+          <option value="{{ p.project_id }}">{{ p.project_name }} ({{ p.project_id }})</option>
+        {% endfor %}
+      </select>
+      <input type="file" id="sm-import-file" accept="application/json,.json">
+      <label class="muted small" style="margin:6px 0;">
+        <input type="checkbox" id="sm-import-overwrite" checked> Overwrite existing values
+      </label>
+      <button class="btn small primary" id="sm-import-btn">Import file</button>
+    </div>
+    {% if accessible_projects|length >= 2 %}
+    <div class="settings-migration-cell">
+      <strong>Clone between projects</strong>
+      <p class="muted small">Copy every setting from one project to another. Server-side only — no file leaves the host.</p>
+      <label class="muted small">Source</label>
+      <select id="sm-clone-source">
+        {% for p in accessible_projects %}
+          <option value="{{ p.project_id }}">{{ p.project_name }} ({{ p.project_id }})</option>
+        {% endfor %}
+      </select>
+      <label class="muted small">Destination</label>
+      <select id="sm-clone-dest">
+        {% for p in accessible_projects %}
+          <option value="{{ p.project_id }}">{{ p.project_name }} ({{ p.project_id }})</option>
+        {% endfor %}
+      </select>
+      <label class="muted small" style="margin:6px 0;">
+        <input type="checkbox" id="sm-clone-overwrite" checked> Overwrite existing values
+      </label>
+      <button class="btn small primary" id="sm-clone-btn">Clone settings</button>
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted" style="padding:16px;">You don't have any projects yet. Create a project before using these tools.</p>
+  {% endif %}
+</section>
+<style>
+  .settings-migration-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    padding: 16px 24px;
+  }
+  .settings-migration-cell {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 14px; border: 1px solid var(--border, #e5e7eb);
+    border-radius: 6px; background: var(--card-bg, #fafafa);
+  }
+  .settings-migration-cell p { margin: 0 0 6px; }
+  .settings-migration-cell .small { font-size: 0.85em; }
+  .settings-migration-cell input[type="file"],
+  .settings-migration-cell select { margin: 4px 0; }
+</style>
+
 <!-- Change password -->
 <section class="panel">
   <header class="panel-head"><h2>Change password</h2></header>
@@ -165,4 +246,5 @@
   </div>
 </section>
 
+<script src="/static/settings_migration.js?v=2"></script>
 {% endblock %}
