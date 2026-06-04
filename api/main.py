@@ -38,6 +38,15 @@ from .humanize import humanize_event, summarize_pipeline
 
 logger = logging.getLogger(__name__)
 
+# Process-wide socket timeout. The Alpaca SDK is synchronous and will
+# hang indefinitely on a slow/stalled connection unless we set a default
+# socket timeout. Production froze at 15:04 today because one such call
+# blocked the event loop. 30 s is plenty for any legitimate Alpaca
+# response (most return in <1 s); past that the call fails and frees
+# the thread.
+import socket as _socket
+_socket.setdefaulttimeout(30.0)
+
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
@@ -890,6 +899,10 @@ async def risk_page(request: Request, project_id: str):
 
 @app.post("/api/projects/{project_id}/contracts/{contract_id}/close")
 async def api_close_contract(request: Request, project_id: str, contract_id: int):
+    """Buy back the contract at mid. NB: every Alpaca call here MUST go
+    through asyncio.to_thread; the Alpaca HTTP client is synchronous and
+    will block the event loop (freezing the whole app) if called
+    directly. That's how prod hung at 15:04 today."""
     from db.repositories import WheelRepo
     from execution import AlpacaClient
     from risk.greeks_agg import _extract_underlying
@@ -903,7 +916,8 @@ async def api_close_contract(request: Request, project_id: str, contract_id: int
         raise HTTPException(404, "Contract not found or already closed")
     client = AlpacaClient(project)
     sym = target["option_symbol"]
-    chain = client.option_chain_quotes(_extract_underlying(sym))
+    chain = await asyncio.to_thread(
+        client.option_chain_quotes, _extract_underlying(sym))
     q = chain.get(sym) or {}
     bid = q.get("bid") or 0
     ask = q.get("ask") or 0
@@ -912,9 +926,11 @@ async def api_close_contract(request: Request, project_id: str, contract_id: int
     mid = (bid + ask) / 2
     qty = int(target.get("quantity") or 1)
     try:
-        order = client.submit_limit_option(option_symbol=sym, qty=qty,
-                                           side="buy",
-                                           limit_price=round(mid, 2))
+        order = await asyncio.to_thread(
+            client.submit_limit_option,
+            option_symbol=sym, qty=qty, side="buy",
+            limit_price=round(mid, 2),
+        )
         EventsRepo.log(project_id, "Manual", "BUY_TO_CLOSE", {
             "ticker": target["ticker"], "option_symbol": sym,
             "qty": qty, "limit_price": round(mid, 2), "order": order,
@@ -950,7 +966,8 @@ async def api_roll_contract(request: Request, project_id: str,
     sym = target["option_symbol"]
     if not sym:
         raise HTTPException(400, "Contract has no option symbol")
-    chain = client.option_chain_quotes(_extract_underlying(sym))
+    chain = await asyncio.to_thread(
+        client.option_chain_quotes, _extract_underlying(sym))
     q = chain.get(sym) or {}
     bid = q.get("bid") or 0
     ask = q.get("ask") or 0
@@ -959,7 +976,8 @@ async def api_roll_contract(request: Request, project_id: str,
     mid = (bid + ask) / 2
     qty = int(target.get("quantity") or 1)
     try:
-        order = client.submit_limit_option(
+        order = await asyncio.to_thread(
+            client.submit_limit_option,
             option_symbol=sym, qty=qty, side="buy",
             limit_price=round(mid, 2),
         )
@@ -1120,7 +1138,7 @@ async def api_import_contract(request: Request, project_id: str,
     # Pull live position
     client = AlpacaClient(project)
     try:
-        live = client.list_positions()
+        live = await asyncio.to_thread(client.list_positions)
     except Exception as e:
         raise HTTPException(502, f"alpaca error: {e}")
     pos = next((p for p in live if str(p.get("symbol") or "").upper() == sym
@@ -1185,7 +1203,8 @@ async def api_close_position(request: Request, project_id: str, position_id: int
         raise HTTPException(404, "Position not found")
     client = AlpacaClient(project)
     try:
-        result = client.liquidate_position(target["ticker"])
+        result = await asyncio.to_thread(
+            client.liquidate_position, target["ticker"])
         PositionsRepo.close(position_id, final_status="CLOSED")
         EventsRepo.log(project_id, "Manual", "POSITION_CLOSED", {
             "ticker": target["ticker"], "qty": target["quantity"],
@@ -1200,16 +1219,21 @@ async def api_close_position(request: Request, project_id: str, position_id: int
 
 @app.post("/api/projects/{project_id}/positions/take_profit_now")
 async def api_take_profit_now(request: Request, project_id: str):
+    """Synchronous Alpaca calls inside — must run on a thread so the
+    event loop doesn't block."""
     _scoped_project(project_id, request)
     from risk.take_profit import evaluate_take_profit
-    return {"actions": evaluate_take_profit(project_id)}
+    actions = await asyncio.to_thread(evaluate_take_profit, project_id)
+    return {"actions": actions}
 
 
 @app.post("/api/projects/{project_id}/positions/auto_roll_now")
 async def api_auto_roll_now(request: Request, project_id: str):
+    """Synchronous Alpaca calls inside — must run on a thread."""
     _scoped_project(project_id, request)
     from risk.auto_roll import evaluate_auto_roll
-    return {"actions": evaluate_auto_roll(project_id)}
+    actions = await asyncio.to_thread(evaluate_auto_roll, project_id)
+    return {"actions": actions}
 
 
 # ---------- IV rank + news -------------------------------------------------

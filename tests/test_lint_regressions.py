@@ -226,7 +226,78 @@ def test_split_mysql_statements_skips_comment_semicolons():
 
 
 # ---------------------------------------------------------------------------
-# 5. systemd unit (in deploy scripts) must use main.py all, not api.
+# 5. async route handlers must not call AlpacaClient methods directly
+#    — they MUST go through asyncio.to_thread(...), or the synchronous
+#    Alpaca SDK blocks the event loop and freezes the entire app.
+#    Production hung at 15:04 today because of this exact bug class.
+# ---------------------------------------------------------------------------
+def test_async_routes_do_not_block_event_loop_with_alpaca_calls():
+    """In api/main.py: any `async def api_…` body that contains a
+    direct `client.<method>(…)` invocation (no surrounding
+    `asyncio.to_thread`) is a latent hang — Alpaca's HTTP SDK is
+    synchronous, so an unwrapped call inside an async handler blocks
+    the whole event loop for as long as Alpaca takes to respond.
+
+    Whitelist: calls to local helpers / sync DB repos are fine — only
+    `AlpacaClient` instance methods are dangerous. Detection heuristic:
+    a function that creates `AlpacaClient(...)` and then uses the
+    resulting variable on a method call line that does NOT also
+    contain `to_thread`.
+    """
+    import ast
+    src_path = REPO_ROOT / "api" / "main.py"
+    src = src_path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        # We only care about FastAPI route handlers — name them api_*
+        # or the page-rendering ones (helps narrow false positives).
+        if not (node.name.startswith("api_") or node.name.endswith("_page")):
+            continue
+        # Walk the function body for `client = AlpacaClient(...)` plus
+        # any synchronous `client.<m>(...)` call.
+        bound_names: set[str] = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call):
+                fn = sub.value.func
+                if (isinstance(fn, ast.Name) and fn.id == "AlpacaClient"
+                        and len(sub.targets) == 1
+                        and isinstance(sub.targets[0], ast.Name)):
+                    bound_names.add(sub.targets[0].id)
+        if not bound_names:
+            continue
+        # Now scan the source lines of this function for
+        # `<bound>.<method>(...)` calls that are NOT inside an
+        # `asyncio.to_thread(...)` wrapper.
+        start = node.lineno
+        end = node.end_lineno or start
+        for ln in range(start, end + 1):
+            line = src.splitlines()[ln - 1]
+            stripped = line.strip()
+            if "to_thread" in stripped:
+                continue
+            for name in bound_names:
+                # Patterns like `client.foo(` etc.
+                pat = (rf"\b{re.escape(name)}\."
+                       r"[A-Za-z_][A-Za-z0-9_]*\s*\(")
+                if re.search(pat, stripped):
+                    offenders.append(
+                        f"{node.name} (line {ln}): {stripped[:100]}"
+                    )
+                    break
+    assert not offenders, (
+        "\nAsync FastAPI route handlers must wrap synchronous Alpaca "
+        "calls in `await asyncio.to_thread(...)`. Direct calls block "
+        "the event loop and freeze the entire app under slow Alpaca "
+        "responses (today's prod hang). Offenders:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. systemd unit (in deploy scripts) must use main.py all, not api.
 # ---------------------------------------------------------------------------
 def test_deploy_scripts_use_main_py_all():
     """The systemd ExecStart was wrong for half a day — set to
