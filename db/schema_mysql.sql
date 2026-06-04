@@ -85,10 +85,12 @@ CREATE TABLE IF NOT EXISTS wheel_contracts (
     INDEX IX_wheel_contracts_project_status (project_id, is_closed)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 6. Agent events
+-- 6. Agent events. project_id is NULLable so cross-project audit
+-- events (password resets etc.) can live here with project_id NULL.
+-- The FK only enforces non-NULL values against trading_projects.
 CREATE TABLE IF NOT EXISTS agent_events (
     event_id      BIGINT AUTO_INCREMENT PRIMARY KEY,
-    project_id    VARCHAR(64) NOT NULL,
+    project_id    VARCHAR(64) NULL,
     node_name     VARCHAR(64) NOT NULL,
     event_type    VARCHAR(32) NOT NULL,
     payload       TEXT NULL,

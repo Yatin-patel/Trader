@@ -336,20 +336,28 @@ async def forgot_submit(request: Request, email: str = Form(...)):
     from auth.password_reset import make_reset_token, send_reset_email
     email = email.strip().lower()
     user = UsersRepo.get_by_email(email)
-    # ALWAYS show the same success page so we don't leak which emails
-    # are registered. Errors only happen for the SMTP-not-configured
-    # case (operator concern, not a security leak).
+    # ALWAYS show the same success page regardless of whether the
+    # email matched a real account or whether SMTP delivery worked.
+    # Showing a different response for "SMTP not configured" vs
+    # "email not registered" lets an attacker enumerate which
+    # addresses have accounts (they see the SMTP error message for
+    # real accounts and the silent success page for unknown ones).
+    # Operator visibility for SMTP misconfig lives in server.log + a
+    # warning banner on the admin page, NOT in the user-facing flow.
     if user is not None and user.is_active:
-        token = make_reset_token(user.user_id)
-        base = str(request.base_url).rstrip("/")
-        reset_url = f"{base}/reset/{token}"
-        ok, msg = send_reset_email(user.email, reset_url)
-        if not ok:
-            # SMTP misconfigured — show the operator the issue so they
-            # can fix it. We DON'T log the URL anywhere user-visible.
-            logger.warning("reset email send failed: %s", msg)
-            return RedirectResponse(
-                f"/forgot?error={msg[:120]}", status_code=303)
+        try:
+            token = make_reset_token(user.user_id)
+            base = str(request.base_url).rstrip("/")
+            reset_url = f"{base}/reset/{token}"
+            ok, msg = send_reset_email(user.email, reset_url)
+            if not ok:
+                logger.warning(
+                    "reset email send failed for %s: %s", user.email, msg
+                )
+        except Exception:
+            logger.exception(
+                "reset token / send pipeline crashed for %s", user.email
+            )
     return RedirectResponse("/forgot?sent=true", status_code=303)
 
 

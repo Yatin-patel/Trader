@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Reset password · Autonomous Trader</title>
+  <link rel="stylesheet" href="/static/app.css?v=10">
+</head>
+<body class="auth-body">
+
+  <main class="auth-shell">
+    <aside class="auth-hero">
+      <div class="auth-hero-mark">⚡</div>
+      <div class="auth-hero-title">Autonomous Trader</div>
+      <div class="auth-hero-tag">Recover access to your projects.</div>
+    </aside>
+
+    <section class="auth-panel">
+      <header class="auth-panel-head">
+        <h1>Reset your password</h1>
+        <p class="muted">We'll send a reset link to your inbox.</p>
+      </header>
+
+      {% if sent %}
+      <div class="alert ok">
+        <div class="alert-detail">
+          If an account exists for the email you entered, a reset link
+          has been sent. The link expires in 1 hour. Check your spam
+          folder if you don't see it.
+        </div>
+      </div>
+      <div class="auth-foot">
+        <a href="/login">Back to sign in</a>
+      </div>
+      {% else %}
+      <form method="post" action="/forgot" class="auth-form">
+        {% if error %}
+        <div class="alert error">
+          <div class="alert-detail">{{ error }}</div>
+        </div>
+        {% endif %}
+        <label class="auth-label">
+          <span>Email</span>
+          <input type="email" name="email" required autofocus
+                 autocomplete="username">
+        </label>
+        <button type="submit" class="btn primary auth-submit">Send reset link</button>
+        <div class="auth-foot">
+          Remembered? <a href="/login">Back to sign in</a>
+        </div>
+      </form>
+      {% endif %}
+    </section>
+  </main>
+
+  <script src="/static/toast.js?v=2"></script>
+</body>
+</html>

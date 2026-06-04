@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Choose a new password · Autonomous Trader</title>
+  <link rel="stylesheet" href="/static/app.css?v=10">
+</head>
+<body class="auth-body">
+
+  <main class="auth-shell">
+    <aside class="auth-hero">
+      <div class="auth-hero-mark">⚡</div>
+      <div class="auth-hero-title">Autonomous Trader</div>
+      <div class="auth-hero-tag">Almost there — set a new password.</div>
+    </aside>
+
+    <section class="auth-panel">
+      {% if not valid %}
+      <header class="auth-panel-head">
+        <h1>Link expired</h1>
+      </header>
+      <div class="alert error">
+        <div class="alert-detail">{{ error or 'This reset link is invalid or has expired.' }}</div>
+      </div>
+      <div class="auth-foot">
+        <a href="/forgot">Request a new reset link</a>
+        <span class="auth-foot-sep">·</span>
+        <a href="/login">Back to sign in</a>
+      </div>
+      {% else %}
+      <header class="auth-panel-head">
+        <h1>New password for {{ email }}</h1>
+        <p class="muted">Pick a password you don't use anywhere else.</p>
+      </header>
+      <form method="post" action="/reset/{{ token }}" class="auth-form">
+        {% if error %}
+        <div class="alert error">
+          <div class="alert-detail">{{ error }}</div>
+        </div>
+        {% endif %}
+        <label class="auth-label">
+          <span>New password (min 10 chars)</span>
+          <input type="password" name="password" required autofocus
+                 minlength="10" autocomplete="new-password">
+        </label>
+        <label class="auth-label">
+          <span>Confirm new password</span>
+          <input type="password" name="password_confirm" required
+                 minlength="10" autocomplete="new-password">
+        </label>
+        <button type="submit" class="btn primary auth-submit">Update password</button>
+        <div class="auth-foot">
+          Updating will log you out of all other devices.
+        </div>
+      </form>
+      {% endif %}
+    </section>
+  </main>
+
+  <script src="/static/toast.js?v=2"></script>
+</body>
+</html>

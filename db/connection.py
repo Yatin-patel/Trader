@@ -213,27 +213,80 @@ def _init_mssql_database(db_name: str) -> None:
 
 
 def _split_mysql_statements(sql: str) -> list[str]:
-    """Split MySQL statements by semicolon (respecting string literals)."""
-    statements = []
-    current = []
-    in_string = False
-    string_char = None
+    """Split MySQL statements by semicolon, respecting string literals
+    AND line comments.
 
-    for char in sql:
-        if char in ('"', "'") and not in_string:
-            in_string = True
-            string_char = char
-        elif char == string_char and in_string:
-            in_string = False
-            string_char = None
-        elif char == ';' and not in_string:
-            statements.append(''.join(current))
-            current = []
+    Previously this function only honored string-literal quoting, so a
+    semicolon inside a `-- ...` line comment was treated as a statement
+    boundary. That meant text from the comment after the `;` got
+    executed as the next statement and produced cryptic 1064 parse
+    errors at init_database() time. Now we also recognise `--` (MySQL
+    line comments) and `/* ... */` (block comments) and skip semicolons
+    inside both.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    in_string = False
+    string_char: str | None = None
+    in_line_comment = False
+    in_block_comment = False
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ""
+
+        if in_line_comment:
+            current.append(ch)
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
             continue
-        current.append(char)
+        if in_block_comment:
+            current.append(ch)
+            if ch == "*" and nxt == "/":
+                current.append(nxt)
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_string:
+            current.append(ch)
+            if ch == string_char:
+                in_string = False
+                string_char = None
+            i += 1
+            continue
+
+        # Not in a string or comment yet — look for an opener.
+        if ch == "-" and nxt == "-":
+            in_line_comment = True
+            current.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            current.append(ch)
+            current.append(nxt)
+            i += 2
+            continue
+        if ch in ('"', "'"):
+            in_string = True
+            string_char = ch
+            current.append(ch)
+            i += 1
+            continue
+        if ch == ";":
+            statements.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
 
     if current:
-        statements.append(''.join(current))
+        statements.append("".join(current))
     return statements
 
 

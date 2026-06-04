@@ -191,7 +191,42 @@ def test_concentration_module_uses_stable_reference():
 
 
 # ---------------------------------------------------------------------------
-# 4. systemd unit (in deploy scripts) must use main.py all, not api.
+# 4. _split_mysql_statements must skip semicolons inside SQL comments.
+# ---------------------------------------------------------------------------
+def test_split_mysql_statements_skips_comment_semicolons():
+    """Today's incident: a `-- ...` comment in schema_mysql.sql contained
+    a semicolon, the splitter treated it as a statement boundary, and
+    the leftover comment text was executed as SQL on every app start
+    (1064 parse error → trader.service failed to start, prod went
+    down). The splitter now recognises `--` line comments and
+    `/* ... */` block comments. Lock that in."""
+    from db.connection import _split_mysql_statements
+
+    # Line comment with embedded semicolon must NOT split.
+    sql = (
+        "-- This comment has a ; semicolon in it\n"
+        "CREATE TABLE foo (id INT);\n"
+        "CREATE TABLE bar (id INT);\n"
+    )
+    out = [s for s in _split_mysql_statements(sql) if s.strip()]
+    assert len(out) == 2, (
+        f"line-comment semicolon split the file into {len(out)} chunks; "
+        f"the comment ate part of the next statement: {out}"
+    )
+
+    # Block comment with embedded semicolon must NOT split.
+    sql = "/* a; b */ CREATE TABLE q (id INT); SELECT 1;"
+    out = [s for s in _split_mysql_statements(sql) if s.strip()]
+    assert len(out) == 2
+
+    # String literals with semicolons still work.
+    sql = "INSERT INTO foo VALUES ('a;b'); SELECT 1;"
+    out = [s for s in _split_mysql_statements(sql) if s.strip()]
+    assert len(out) == 2
+
+
+# ---------------------------------------------------------------------------
+# 5. systemd unit (in deploy scripts) must use main.py all, not api.
 # ---------------------------------------------------------------------------
 def test_deploy_scripts_use_main_py_all():
     """The systemd ExecStart was wrong for half a day — set to

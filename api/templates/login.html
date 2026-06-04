@@ -25,6 +25,13 @@
         <p class="muted">Sign in to your projects.</p>
       </header>
       <form method="post" action="/login" class="auth-form">
+        {% if request.query_params.get('reset') == 'true' %}
+        <div class="alert ok">
+          <div class="alert-detail">
+            Password updated. Sign in with your new password below.
+          </div>
+        </div>
+        {% endif %}
         {% if error %}
         <div class="alert error">
           <div class="alert-detail">{{ error }}</div>
@@ -42,6 +49,8 @@
         </label>
         <button type="submit" class="btn primary auth-submit">Sign in</button>
         <div class="auth-foot">
+          <a href="/forgot">Forgot password?</a>
+          <span class="auth-foot-sep">·</span>
           New here? <a href="/signup">Create an account</a>
         </div>
       </form>
