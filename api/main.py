@@ -987,6 +987,190 @@ async def api_roll_contract(request: Request, project_id: str,
         raise HTTPException(400, f"roll failed: {e}")
 
 
+# ---------- Manual DB overrides for wheel_contracts ------------------------
+# These three endpoints exist for the case the broker state and the
+# wheel_contracts table have diverged — e.g. a manual order outside the
+# bot, a partial fill the reconciler missed, or a stale DB row left over
+# from a prior project. They DO NOT submit orders to the broker; they
+# only edit / close / create the local DB row. Every override writes a
+# Manual.DB_OVERRIDE audit event so the change is reviewable.
+
+class _ContractEditIn(BaseModel):
+    strategy_phase: str | None = None
+    quantity: int | None = None
+    strike_price: float | None = None
+    premium_collected: float | None = None
+    delta_at_entry: float | None = None
+    expiration_date: str | None = None  # YYYY-MM-DD
+
+
+@app.post("/api/projects/{project_id}/contracts/{contract_id}/edit")
+async def api_edit_contract(request: Request, project_id: str,
+                            contract_id: int, payload: _ContractEditIn):
+    """Patch fields on an open wheel_contracts row. Only the supplied
+    fields change. NO broker order is submitted — this is purely a DB
+    edit to bring the local row in sync with reality."""
+    from db.repositories import WheelRepo
+    _scoped_project(project_id, request)
+    target = None
+    for c in WheelRepo.list_open(project_id):
+        if c["contract_id"] == contract_id:
+            target = c
+            break
+    if target is None:
+        raise HTTPException(404, "Contract not found or already closed")
+    sets: dict[str, Any] = {}
+    if payload.strategy_phase is not None:
+        sets["strategy_phase"] = payload.strategy_phase[:32]
+    if payload.quantity is not None:
+        sets["quantity"] = int(payload.quantity)
+    if payload.strike_price is not None:
+        sets["strike_price"] = float(payload.strike_price)
+    if payload.premium_collected is not None:
+        sets["premium_collected"] = float(payload.premium_collected)
+    if payload.delta_at_entry is not None:
+        sets["delta_at_entry"] = float(payload.delta_at_entry)
+    if payload.expiration_date is not None:
+        sets["expiration_date"] = payload.expiration_date[:10]
+    if not sets:
+        raise HTTPException(400, "no fields to update")
+    from sqlalchemy import text as _text
+    from db.connection import session_scope
+    set_sql = ", ".join(f"{k} = :{k}" for k in sets)
+    sets["c"] = contract_id
+    with session_scope() as s:
+        s.execute(_text(
+            f"UPDATE wheel_contracts SET {set_sql}, "
+            f"updated_at = UTC_TIMESTAMP(6) WHERE contract_id = :c"
+        ), sets)
+        s.commit()
+    sets.pop("c")
+    EventsRepo.log(project_id, "Manual", "DB_OVERRIDE", {
+        "action": "edit_contract",
+        "contract_id": contract_id,
+        "ticker": target.get("ticker"),
+        "option_symbol": target.get("option_symbol"),
+        "before": {k: target.get(k) for k in sets},
+        "after": sets,
+        "narrative": [
+            f"User edited wheel_contracts row #{contract_id} "
+            f"({target.get('ticker')}): {sets}"
+        ],
+    })
+    return {"ok": True, "applied": sets}
+
+
+@app.post("/api/projects/{project_id}/contracts/{contract_id}/force_close")
+async def api_force_close_contract(request: Request, project_id: str,
+                                   contract_id: int):
+    """Mark the wheel_contracts row is_closed=1 WITHOUT submitting any
+    broker order. Used when the position no longer exists at the broker
+    (e.g. closed manually outside the bot, expired, or DB row was
+    bogus to begin with) and you just want the bot to stop tracking
+    it. Different from /close which actually buys back at market."""
+    from db.repositories import WheelRepo
+    _scoped_project(project_id, request)
+    target = None
+    for c in WheelRepo.list_open(project_id):
+        if c["contract_id"] == contract_id:
+            target = c
+            break
+    if target is None:
+        raise HTTPException(404, "Contract not found or already closed")
+    WheelRepo.close(contract_id)
+    EventsRepo.log(project_id, "Manual", "DB_OVERRIDE", {
+        "action": "force_close_db_row",
+        "contract_id": contract_id,
+        "ticker": target.get("ticker"),
+        "option_symbol": target.get("option_symbol"),
+        "narrative": [
+            f"User force-closed wheel_contracts row #{contract_id} "
+            f"({target.get('ticker')} {target.get('option_symbol')}). "
+            "No broker order was submitted — the DB row is just "
+            "marked is_closed=1 so the bot stops tracking it."
+        ],
+    })
+    return {"ok": True}
+
+
+class _ContractImportIn(BaseModel):
+    option_symbol: str
+    strategy_phase: str | None = None  # auto-inferred if omitted
+
+
+@app.post("/api/projects/{project_id}/contracts/import")
+async def api_import_contract(request: Request, project_id: str,
+                              payload: _ContractImportIn):
+    """Create a wheel_contracts row from a live Alpaca option position
+    that isn't already tracked. Reads avg_entry_price / qty / OCC symbol
+    from Alpaca, infers CSP vs CC from the option right + qty sign, and
+    inserts. Refuses if the symbol is already tracked OR not currently
+    held at the broker."""
+    from datetime import datetime as _dt
+    from db.repositories import WheelRepo
+    from execution import AlpacaClient
+    project = _scoped_project(project_id, request)
+    sym = (payload.option_symbol or "").upper().strip()
+    if not sym:
+        raise HTTPException(400, "option_symbol required")
+    # Already tracked?
+    for c in WheelRepo.list_open(project_id):
+        if (c.get("option_symbol") or "").upper() == sym:
+            raise HTTPException(409, "already tracked")
+    # Pull live position
+    client = AlpacaClient(project)
+    try:
+        live = client.list_positions()
+    except Exception as e:
+        raise HTTPException(502, f"alpaca error: {e}")
+    pos = next((p for p in live if str(p.get("symbol") or "").upper() == sym
+                and p.get("asset_class") == "us_option"), None)
+    if pos is None:
+        raise HTTPException(404, f"no live position for {sym}")
+    # Parse OCC symbol — same regex as the front-end parseOcc.
+    import re as _re
+    m = _re.match(r"^([A-Z.]+)(\d{6})([CP])(\d{8})$", sym)
+    if not m:
+        raise HTTPException(400, "unrecognized OCC symbol format")
+    ticker = m.group(1)
+    exp_str = m.group(2)
+    right = m.group(3)
+    strike = int(m.group(4)) / 1000.0
+    exp = _dt.strptime("20" + exp_str, "%Y%m%d").date()
+    qty = float(pos.get("qty") or 0)
+    avg_entry = float(pos.get("avg_entry_price") or 0)
+    is_short = qty < 0
+    if not is_short:
+        raise HTTPException(400,
+            "Long positions can't be imported as wheel contracts (CSP/CC). "
+            "The wheel pipeline only manages SHORT options.")
+    phase = (payload.strategy_phase
+             or ("CASH_SECURED_PUT" if right == "P" else "COVERED_CALL"))
+    contract_id = WheelRepo.open_contract(
+        project_id=project_id, ticker=ticker,
+        phase=phase, option_symbol=sym,
+        strike=strike, premium=avg_entry,
+        expiration=exp, delta=None, quantity=int(abs(qty)),
+    )
+    EventsRepo.log(project_id, "Manual", "DB_OVERRIDE", {
+        "action": "import_contract",
+        "contract_id": contract_id,
+        "ticker": ticker, "option_symbol": sym,
+        "phase": phase, "strike": strike,
+        "premium_collected": avg_entry, "quantity": int(abs(qty)),
+        "expiration": exp.isoformat(),
+        "narrative": [
+            f"User imported live Alpaca position {sym} into "
+            f"wheel_contracts as #{contract_id} (phase={phase}, "
+            f"qty={int(abs(qty))}, premium=${avg_entry:.2f}). The wheel "
+            f"pipeline will now manage it."
+        ],
+    })
+    return {"ok": True, "contract_id": contract_id, "ticker": ticker,
+            "phase": phase, "strike": strike, "premium": avg_entry,
+            "quantity": int(abs(qty)), "expiration": exp.isoformat()}
+
+
 @app.post("/api/projects/{project_id}/positions/{position_id}/close")
 async def api_close_position(request: Request, project_id: str, position_id: int):
     from db.repositories import PositionsRepo
@@ -1278,11 +1462,17 @@ async def api_recon_history(request: Request, project_id: str, limit: int = 20):
 
 
 @app.post("/api/projects/{project_id}/reconciliation/run")
-async def api_recon_run(request: Request, project_id: str, auto_sync: bool = False):
+async def api_recon_run(request: Request, project_id: str,
+                        auto_sync: bool = False, deep_sync: bool = False):
+    """Run the DB-vs-broker reconciler. ``deep_sync=True`` additionally
+    catches qty mismatches and long-vs-short flips (the NIO class of
+    bug). The same code path the 14:00 / 19:30 UTC scheduled jobs use."""
     _scoped_project(project_id, request)
     from ops.reconciliation import run_reconciliation
-    return await asyncio.to_thread(run_reconciliation, project_id,
-                                   auto_sync=auto_sync)
+    return await asyncio.to_thread(
+        run_reconciliation, project_id,
+        auto_sync=auto_sync, deep_sync=deep_sync,
+    )
 
 
 @app.get("/api/backups")

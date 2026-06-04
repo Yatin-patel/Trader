@@ -122,6 +122,43 @@ class MultiTenantRunner:
             sched.add_job(_recon_tick, "interval", minutes=recon_min,
                           id="reconciliation", replace_existing=True)
 
+        # ---- Deep position reconciliation (twice daily) -----------
+        # The 15-min light pass above only detects PRESENCE mismatches
+        # (DB has it / broker doesn't, or vice versa). It does NOT catch
+        # qty drift or long-vs-short flips, which is how NIO went from
+        # short-1 to long-12 today without anyone noticing.
+        # This deeper job catches those AND auto-fixes when the project
+        # has reconcile_auto_sync enabled. Runs at 10:00 ET and 15:30 ET
+        # (post-open and pre-close) so it sees stable broker state.
+        async def _deep_recon_tick():
+            from db.repositories import ProjectsRepo as _PR
+            try:
+                for proj in _PR.list_active():
+                    try:
+                        from ops.reconciliation import run_reconciliation
+                        await asyncio.to_thread(
+                            run_reconciliation, proj.project_id,
+                            deep_sync=True,
+                        )
+                    except Exception as ex:
+                        logger.exception(
+                            "deep reconcile failed for %s: %s",
+                            proj.project_id, ex,
+                        )
+            except Exception as ex:
+                logger.exception("deep recon tick error: %s", ex)
+        # 10:00 ET = 14:00 UTC (EDT) / 15:00 UTC (EST). Use UTC and let
+        # APScheduler treat it as cron. Both 14:00 and 19:30 UTC fall
+        # safely inside RTH for both EDT and EST.
+        sched.add_job(_deep_recon_tick, "cron",
+                      hour=14, minute=0,
+                      id="deep_reconciliation_am",
+                      replace_existing=True)
+        sched.add_job(_deep_recon_tick, "cron",
+                      hour=19, minute=30,
+                      id="deep_reconciliation_pm",
+                      replace_existing=True)
+
         # ---- Orders status polling ----------------------------------
         async def _orders_tick():
             from db.repositories import ProjectsRepo as _PR

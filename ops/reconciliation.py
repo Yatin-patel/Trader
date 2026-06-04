@@ -39,7 +39,27 @@ def _record(project_id: str, mismatches: list[dict[str, Any]],
         return recon_id
 
 
-def run_reconciliation(project_id: str, *, auto_sync: bool | None = None) -> dict[str, Any]:
+def run_reconciliation(project_id: str, *,
+                       auto_sync: bool | None = None,
+                       deep_sync: bool = False) -> dict[str, Any]:
+    """Compare wheel_contracts + stock_positions against the live broker
+    account and produce a diff report.
+
+    Modes:
+      * Light (default) — detects PRESENCE mismatches only. Cheap; runs
+        every 15 minutes.
+      * Deep (deep_sync=True) — also detects qty mismatches and
+        long-vs-short direction mismatches. The NIO bug today (DB said
+        short 1, Alpaca said long 12, AutoRoll kept buying more) would
+        have been caught by deep sync. Runs 2x/day from the scheduler.
+
+    When ``auto_sync`` is True (or the project setting
+    ``reconcile_auto_sync`` is True), repairable mismatches are fixed
+    in-place: phantom DB rows get is_closed=1, qty mismatches are
+    rewritten to broker reality, long-vs-short mismatches force-close
+    the DB row (LONG positions aren't wheel contracts), and untracked
+    short options can be auto-imported when ``deep_sync`` is on.
+    """
     project = ProjectsRepo.get(project_id)
     if project is None:
         return {"error": "project not found"}
@@ -87,16 +107,110 @@ def run_reconciliation(project_id: str, *, auto_sync: bool | None = None) -> dic
                     s.commit()
                 entry["action"] = "marked_closed"
 
+    # --- DEEP SYNC ONLY: qty + side mismatches on tracked rows -------
+    # The NIO incident today (DB:short-1 vs Alpaca:long-12) and the F
+    # qty drift (DB:3 vs Alpaca:6) fall into this bucket. The light
+    # pass misses them because the symbol IS present on both sides.
+    if deep_sync:
+        for c in open_contracts:
+            sym = c.get("option_symbol")
+            if not sym or sym not in alpaca_options:
+                continue
+            live_pos = alpaca_options[sym]
+            try:
+                live_qty = float(live_pos.get("qty") or 0)
+            except Exception:
+                continue
+            db_qty = int(c.get("quantity") or 1)
+            # Side check: short wheel contracts must show as qty<0 at
+            # broker. A positive qty means it's actually a LONG put/call
+            # — definitely not a wheel CSP/CC.
+            if live_qty > 0:
+                entry = {
+                    "type": "contract_long_vs_short_mismatch",
+                    "ticker": c["ticker"],
+                    "option_symbol": sym,
+                    "contract_id": c["contract_id"],
+                    "db_qty": db_qty,
+                    "live_qty": live_qty,
+                    "note": ("DB says short wheel contract; broker says "
+                             "LONG position. LONG options are not wheel "
+                             "contracts."),
+                }
+                mismatches.append(entry)
+                if auto_sync:
+                    with session_scope() as s:
+                        s.execute(text("""
+                            UPDATE wheel_contracts
+                            SET is_closed = 1,
+                                updated_at = UTC_TIMESTAMP()
+                            WHERE contract_id = :c
+                        """), {"c": c["contract_id"]})
+                        s.commit()
+                    entry["action"] = "force_closed_db_row"
+            elif abs(abs(live_qty) - db_qty) > 0.5:
+                entry = {
+                    "type": "contract_qty_mismatch",
+                    "ticker": c["ticker"],
+                    "option_symbol": sym,
+                    "contract_id": c["contract_id"],
+                    "db_qty": db_qty,
+                    "live_qty_abs": int(abs(live_qty)),
+                }
+                mismatches.append(entry)
+                if auto_sync:
+                    with session_scope() as s:
+                        s.execute(text("""
+                            UPDATE wheel_contracts
+                            SET quantity = :q,
+                                updated_at = UTC_TIMESTAMP()
+                            WHERE contract_id = :c
+                        """), {"q": int(abs(live_qty)),
+                               "c": c["contract_id"]})
+                        s.commit()
+                    entry["action"] = "qty_synced"
+
     # --- Alpaca option that DB doesn't track --------------------------
     tracked_syms = {c.get("option_symbol") for c in open_contracts}
     for sym, p in alpaca_options.items():
         if sym in tracked_syms:
             continue
-        mismatches.append({
+        try:
+            live_qty = float(p.get("qty") or 0)
+        except Exception:
+            live_qty = 0
+        entry: dict[str, Any] = {
             "type": "alpaca_option_untracked",
             "symbol": sym,
             "qty": p.get("qty"),
-        })
+            "side": "short" if live_qty < 0 else "long",
+        }
+        # Deep sync + auto_sync + SHORT: import as a wheel contract.
+        # LONG positions are NOT auto-imported (wheel manages only
+        # shorts) — those just stay flagged for manual review.
+        if deep_sync and auto_sync and live_qty < 0:
+            import re as _re
+            from datetime import datetime as _dt
+            m = _re.match(r"^([A-Z.]+)(\d{6})([CP])(\d{8})$", sym)
+            if m:
+                ticker = m.group(1)
+                exp_iso = m.group(2)
+                right = m.group(3)
+                strike = int(m.group(4)) / 1000.0
+                exp = _dt.strptime("20" + exp_iso, "%Y%m%d").date()
+                avg_entry = float(p.get("avg_entry_price") or 0)
+                phase = ("CASH_SECURED_PUT" if right == "P"
+                         else "COVERED_CALL")
+                cid = WheelRepo.open_contract(
+                    project_id=project_id, ticker=ticker,
+                    phase=phase, option_symbol=sym,
+                    strike=strike, premium=avg_entry,
+                    expiration=exp, delta=None,
+                    quantity=int(abs(live_qty)),
+                )
+                entry["action"] = "imported"
+                entry["contract_id"] = cid
+        mismatches.append(entry)
 
     # --- DB stock_positions vs Alpaca shares --------------------------
     for pos in open_positions:
