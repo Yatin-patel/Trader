@@ -128,6 +128,29 @@
     .risk-safe  { background: #d1fae5; color: #065f46; }
     .risk-watch { background: #fef3c7; color: #92400e; }
     .risk-itm   { background: #fee2e2; color: #991b1b; }
+
+    /* Kebab dropdown on each row */
+    .actions-cell { white-space: nowrap; }
+    .row-menu-wrap { position: relative; display: inline-block; }
+    .row-menu-btn { padding: 2px 8px; font-size: 16px; line-height: 1; }
+    .row-menu {
+      display: none; position: absolute; right: 0; top: 100%;
+      min-width: 200px; z-index: 50;
+      background: var(--bg, #fff); border: 1px solid var(--border, #d1d5db);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+      border-radius: 6px; padding: 4px;
+      margin-top: 2px;
+    }
+    .row-menu.open { display: block; }
+    .row-menu .menu-item {
+      display: block; width: 100%; text-align: left;
+      padding: 7px 12px; border: 0; background: transparent;
+      font: inherit; cursor: pointer; border-radius: 4px;
+      color: var(--text, #111);
+    }
+    .row-menu .menu-item:hover { background: #f3f4f6; }
+    .row-menu .menu-item.warn { color: #b45309; }
+    .row-menu .menu-item.warn:hover { background: #fef3c7; }
   </style>
 </div>
 
@@ -244,5 +267,5 @@
   })();
 </script>
 
-<script src="/static/project_dashboard.js?v=8"></script>
+<script src="/static/project_dashboard.js?v=9"></script>
 {% endblock %}

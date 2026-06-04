@@ -300,6 +300,156 @@
       toast.error("Roll failed: " + (err.detail || r.statusText));
     }
   }
+
+  // ----- Manual DB-override actions on contracts ------------------------
+  async function forceCloseContract(cid, label) {
+    const proceed = await confirmModal(
+      `Force-close ${label}?\n\nThis ONLY marks the DB row is_closed=1 — no buy-to-close order is submitted to the broker. Use when the position has already been closed outside the bot, or when the DB row is wrong and you want the bot to stop tracking it.`,
+      { title: "Force-close DB row", okLabel: "Force-close" });
+    if (!proceed) return;
+    const r = await fetch(
+      `/api/projects/${projectIdEnc}/contracts/${cid}/force_close`,
+      { method: "POST" });
+    if (r.ok) { tick(); toast.ok("DB row marked closed. No broker order sent."); }
+    else {
+      const err = await r.json().catch(() => ({ detail: r.statusText }));
+      toast.error("Force-close failed: " + (err.detail || r.statusText));
+    }
+  }
+
+  async function importContract(sym) {
+    const proceed = await confirmModal(
+      `Import ${sym} from Alpaca into wheel_contracts?\n\nThe bot will then manage it as a wheel contract (Roll / Close / auto-roll). Only valid for SHORT positions — long puts/calls can't be imported.`,
+      { title: "Import to DB", okLabel: "Import", danger: false });
+    if (!proceed) return;
+    const r = await fetch(
+      `/api/projects/${projectIdEnc}/contracts/import`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ option_symbol: sym }),
+      });
+    const out = await r.json().catch(() => ({}));
+    if (r.ok) {
+      tick();
+      toast.ok(`Imported ${out.ticker} ${out.phase} as #${out.contract_id}`);
+    } else {
+      toast.error("Import failed: " + (out.detail || r.statusText));
+    }
+  }
+
+  // Edit modal — built lazily on first invocation, reused after.
+  function ensureEditDialog() {
+    let dlg = document.getElementById("__contract-edit-dialog");
+    if (dlg) return dlg;
+    dlg = document.createElement("dialog");
+    dlg.id = "__contract-edit-dialog";
+    dlg.innerHTML = `
+      <form method="dialog" style="min-width: 420px; max-width: 520px;">
+        <h2 style="margin: 0 0 12px; font-size: 17px;">Edit DB row</h2>
+        <p style="margin: 0 0 14px; color: var(--text-soft); font-size: 13px;">
+          Edits the wheel_contracts row only. <strong>No broker order is sent.</strong>
+          Leave a field blank to keep its current value.
+        </p>
+        <div id="__contract-edit-meta" class="muted" style="font-size: 12px; margin-bottom: 12px;"></div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 12px;">
+            <span>Phase</span>
+            <select name="strategy_phase">
+              <option value="">— unchanged —</option>
+              <option value="CASH_SECURED_PUT">CASH_SECURED_PUT</option>
+              <option value="COVERED_CALL">COVERED_CALL</option>
+              <option value="STOCK_ASSIGNED">STOCK_ASSIGNED</option>
+            </select>
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 12px;">
+            <span>Quantity</span>
+            <input name="quantity" type="number" min="1" step="1" placeholder="e.g. 1">
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 12px;">
+            <span>Strike</span>
+            <input name="strike_price" type="number" step="0.01" min="0" placeholder="e.g. 17.50">
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 12px;">
+            <span>Premium per share</span>
+            <input name="premium_collected" type="number" step="0.01" min="0" placeholder="e.g. 0.45">
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 12px;">
+            <span>Δ at entry</span>
+            <input name="delta_at_entry" type="number" step="0.001" min="-1" max="1" placeholder="-0.30">
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 12px;">
+            <span>Expiration</span>
+            <input name="expiration_date" type="date">
+          </label>
+        </div>
+        <div class="dialog-actions" style="margin-top: 18px;">
+          <button type="button" class="btn ghost small" data-cancel>Cancel</button>
+          <button type="button" class="btn primary small" data-ok>Save</button>
+        </div>
+      </form>`;
+    document.body.appendChild(dlg);
+    return dlg;
+  }
+
+  async function editContract(cid, label) {
+    const dlg = ensureEditDialog();
+    const form = dlg.querySelector("form");
+    form.reset();
+    dlg.querySelector("#__contract-edit-meta").textContent =
+      `Editing: ${label} (DB row #${cid})`;
+    const okBtn = dlg.querySelector("[data-ok]");
+    const cancelBtn = dlg.querySelector("[data-cancel]");
+    const result = await new Promise((resolve) => {
+      function cleanup(out) {
+        okBtn.removeEventListener("click", onOk);
+        cancelBtn.removeEventListener("click", onCancel);
+        dlg.removeEventListener("close", onClose);
+        dlg.close();
+        resolve(out);
+      }
+      function onOk() {
+        const fd = new FormData(form);
+        const payload = {};
+        for (const [k, v] of fd.entries()) {
+          const s = String(v).trim();
+          if (!s) continue;
+          payload[k] = (k === "strategy_phase"
+                       || k === "expiration_date") ? s : Number(s);
+        }
+        cleanup(payload);
+      }
+      function onCancel() { cleanup(null); }
+      function onClose() { cleanup(null); }
+      okBtn.addEventListener("click", onOk);
+      cancelBtn.addEventListener("click", onCancel);
+      dlg.addEventListener("close", onClose);
+      dlg.showModal();
+    });
+    if (!result || !Object.keys(result).length) return;
+    const r = await fetch(
+      `/api/projects/${projectIdEnc}/contracts/${cid}/edit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(result),
+      });
+    const out = await r.json().catch(() => ({}));
+    if (r.ok) {
+      tick();
+      const keys = Object.keys(out.applied || {}).join(", ");
+      toast.ok(`Updated ${keys || "row"}.`);
+    } else {
+      toast.error("Edit failed: " + (out.detail || r.statusText));
+    }
+  }
+
+  // Close any open kebab menus on outside click.
+  document.addEventListener("click", (ev) => {
+    if (!ev.target.closest(".row-menu") && !ev.target.closest(".row-menu-btn")) {
+      document.querySelectorAll(".row-menu.open").forEach(m => m.classList.remove("open"));
+    }
+  });
   async function closeAlpacaSymbol(symbol) {
     if (!await confirmModal(`Close Alpaca position ${symbol}? Submits a market order.`,
         { title: "Close position", okLabel: "Close" })) return;
@@ -435,9 +585,28 @@
       const rollBtn = (tracked && !isLong)
         ? `<button class="btn small ghost" data-roll-contract="${c.contract_id}" data-label="${escapeHtml(ticker + ' ' + phase)}" title="Buy-to-close; Strategist reopens on next cycle">Roll</button>`
         : "";
+      // Kebab menu items — manual DB-override actions. Different items
+      // depending on whether we have a tracked row to operate on:
+      //  * tracked   -> Edit / Force-close DB row
+      //  * untracked + short -> Import to DB
+      //  * untracked + long  -> nothing (long positions can't be wheel-managed)
+      let kebab = "";
+      const items = [];
+      if (tracked) {
+        items.push(`<button class="menu-item" data-edit-contract="${c.contract_id}" data-label="${escapeHtml(ticker + ' ' + phase)}">Edit DB row…</button>`);
+        items.push(`<button class="menu-item warn" data-forceclose-contract="${c.contract_id}" data-label="${escapeHtml(ticker + ' ' + phase)}">Force-close DB row</button>`);
+      } else if (isShort) {
+        items.push(`<button class="menu-item" data-import-symbol="${escapeHtml(sym)}">Import to DB…</button>`);
+      }
+      if (items.length) {
+        kebab = `<span class="row-menu-wrap">
+          <button class="btn small ghost row-menu-btn" title="More actions" aria-haspopup="true">⋮</button>
+          <span class="row-menu">${items.join("")}</span>
+        </span>`;
+      }
       rows.push({
         ticker, sym, phase, strike, qty: absQty, credit, btcNow, pl, pctCapt,
-        expiration, dte, tracked, closeBtn, rollBtn, rcls, isLong, isShort,
+        expiration, dte, tracked, closeBtn, rollBtn, kebab, rcls, isLong, isShort,
       });
     });
 
@@ -482,7 +651,7 @@
         <td class="right ${plClass(r.pl)}">${fmtPL(r.pl)}</td>
         <td class="right ${plClass(r.pl)}">${fmtPct(r.pctCapt)}</td>
         <td>${escapeHtml(String(r.expiration || "—"))}</td>
-        <td>${r.rollBtn} ${r.closeBtn}</td>
+        <td class="actions-cell">${r.rollBtn} ${r.closeBtn} ${r.kebab}</td>
       </tr>
     `).join("");
 
@@ -495,6 +664,27 @@
     tbody.querySelectorAll("[data-roll-contract]").forEach(b =>
       b.addEventListener("click", () => rollContract(b.dataset.rollContract, b.dataset.label))
     );
+    tbody.querySelectorAll("[data-edit-contract]").forEach(b =>
+      b.addEventListener("click", () => editContract(b.dataset.editContract, b.dataset.label))
+    );
+    tbody.querySelectorAll("[data-forceclose-contract]").forEach(b =>
+      b.addEventListener("click", () => forceCloseContract(b.dataset.forcecloseContract, b.dataset.label))
+    );
+    tbody.querySelectorAll("[data-import-symbol]").forEach(b =>
+      b.addEventListener("click", () => importContract(b.dataset.importSymbol))
+    );
+    // Toggle kebab dropdown on click. Outside-click handler at module
+    // scope closes any open menu.
+    tbody.querySelectorAll(".row-menu-btn").forEach(b => {
+      b.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const menu = b.parentElement.querySelector(".row-menu");
+        document.querySelectorAll(".row-menu.open").forEach(m => {
+          if (m !== menu) m.classList.remove("open");
+        });
+        menu.classList.toggle("open");
+      });
+    });
   }
 
   function renderTimeline(snap) {

@@ -36,15 +36,35 @@ _DEFAULT_UNIVERSE = [
 ]
 
 
+def _quarantined_symbols(project_id: str) -> set[str]:
+    """Per-project blocklist. Tickers here are dropped from the universe
+    before any filters run and never reach the Strategist. Use for
+    delisted/renamed symbols (SQ → XYZ), names you don't want exposure
+    to, or as a temporary backoff after a bad fill."""
+    raw = ProjectSettings.get(project_id, "quarantined_symbols", default="")
+    if not raw:
+        return set()
+    if isinstance(raw, list):
+        items = raw
+    else:
+        items = str(raw).split(",")
+    return {str(x).strip().upper() for x in items if str(x).strip()}
+
+
 def _load_universe(project_id: str) -> list[str]:
     custom = ProjectSettings.get(project_id, "watchlist", default=None)
     if not custom:
-        return _DEFAULT_UNIVERSE
-    if isinstance(custom, str):
-        return [s.strip().upper() for s in custom.split(",") if s.strip()]
-    if isinstance(custom, list):
-        return [str(s).upper() for s in custom]
-    return _DEFAULT_UNIVERSE
+        universe = list(_DEFAULT_UNIVERSE)
+    elif isinstance(custom, str):
+        universe = [s.strip().upper() for s in custom.split(",") if s.strip()]
+    elif isinstance(custom, list):
+        universe = [str(s).upper() for s in custom]
+    else:
+        universe = list(_DEFAULT_UNIVERSE)
+    blocked = _quarantined_symbols(project_id)
+    if blocked:
+        universe = [t for t in universe if t.upper() not in blocked]
+    return universe
 
 
 def scan_movers_node(state: dict[str, Any]) -> dict[str, Any]:
