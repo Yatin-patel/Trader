@@ -605,6 +605,35 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
                         })
 
         except Exception as _strat_err:
+            err_text = str(_strat_err)
+            # Alpaca 42210000 = "invalid underlying symbols". These are
+            # structural problems (delisted, renamed, or never existed)
+            # that fire on EVERY cycle and will never self-resolve. Demote
+            # to a routine SELECTION skip so the error banner stops
+            # popping every 5 minutes. The user can fix it by editing
+            # the watchlist; meanwhile we don't pollute the activity feed.
+            is_invalid_symbol = (
+                "invalid underlying" in err_text.lower()
+                or "42210000" in err_text
+            )
+            if is_invalid_symbol:
+                rejections.append({
+                    "ticker": ticker,
+                    "reason": "invalid symbol (Alpaca rejected; "
+                              "likely renamed/delisted)",
+                })
+                EventsRepo.log(project_id, "Strategist", "SELECTION", {
+                    "ticker": ticker,
+                    "outcome": "invalid_symbol",
+                    "error": err_text[:200],
+                    "narrative": [
+                        f"Skipping {ticker}: Alpaca rejected the symbol "
+                        f"as invalid. Likely renamed (e.g. SQ -> XYZ for "
+                        f"Block) or delisted. Remove it from the watchlist "
+                        f"to clean up future cycles.",
+                    ],
+                })
+                continue
             logger.exception(
                 "strategist failed for ticker %s: %s",
                 ticker, _strat_err,

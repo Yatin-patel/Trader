@@ -28,7 +28,11 @@ _DEFAULT_UNIVERSE = [
     "JNJ", "PFE", "MRK", "LLY",
     "WMT", "COST", "TGT", "HD",
     "DIS", "BA", "F", "GM",
-    "COIN", "PLTR", "SHOP", "SQ", "PYPL",
+    "COIN", "PLTR", "SHOP", "PYPL",
+    # NB: removed SQ — Block renamed its ticker to XYZ on Nasdaq;
+    # Alpaca rejects SQ with 42210000 "invalid underlying symbols"
+    # and the Strategist used to error every cycle on it. Add "XYZ"
+    # if you want exposure to the renamed entity.
 ]
 
 
