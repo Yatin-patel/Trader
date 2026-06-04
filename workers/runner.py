@@ -130,8 +130,36 @@ class MultiTenantRunner:
         # in /intelligence. Interval is configurable globally via
         # AppSettings 'optimizer_interval_minutes' (default 30, 0 to
         # disable).
+        #
+        # MARKET-HOURS GATE: only fire 04:00 - 20:00 ET on trading
+        # days (regular session + extended hours). Outside that
+        # window the Optimizer is idle — running the LLM on settings
+        # during dead hours wastes API spend and the metrics it reads
+        # don't change between, say, 23:00 ET and 03:00 ET anyway.
+        # The user explicitly asked for this gate.
         async def _optimizer_tick():
             try:
+                # Reuse the worker's existing ET-window helper. It
+                # checks 04:00 - 20:00 ET AND that the date is in
+                # Alpaca's trading-day calendar (skips weekends +
+                # holidays). Needs a client to read the calendar,
+                # so pick any active project's broker connection.
+                from workers.tenant_worker import _in_extended_hours_window
+                from db.repositories import ProjectsRepo as _PR
+                from execution import AlpacaClient
+                active = _PR.list_active()
+                if not active:
+                    return
+                in_window = await asyncio.to_thread(
+                    _in_extended_hours_window,
+                    AlpacaClient(active[0]),
+                )
+                if not in_window:
+                    logger.debug(
+                        "optimizer tick skipped: outside ET 04:00-20:00 "
+                        "window or non-trading day"
+                    )
+                    return
                 from intelligence.optimizer_agent import run_all_active
                 await asyncio.to_thread(run_all_active)
             except Exception as ex:
