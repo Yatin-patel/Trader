@@ -229,10 +229,15 @@ def summarize_pipeline(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]
                     bits.append(tk)
                 if len(bits) >= 4:
                     break
-            if not bits:
-                msg = "Blocked by Guardrail this cycle — no approved trades"
-            else:
+            if bits:
                 msg = "Blocked by Guardrail: " + ", ".join(bits)
+            else:
+                # No Guardrail per-trade rejections — i.e. the Strategist
+                # gave it 0 trades to evaluate. Look back at the latest
+                # Strategist SELECTION events to find WHY everything got
+                # skipped (economic event, all already-open, low IV, etc).
+                msg = _strategist_skip_summary(events, gts) \
+                    or "Blocked by Guardrail this cycle — no approved trades"
             nodes["Executor"] = {
                 "status": "active",
                 "summary": msg,
@@ -240,3 +245,82 @@ def summarize_pipeline(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]
                 "kind": "guardrail-alert",
             }
     return nodes
+
+
+# Maps a Strategist SELECTION outcome code to a short human label used
+# on the Executor card when EVERY ticker got skipped for that reason.
+_STRATEGIST_OUTCOME_LABELS: dict[str, str] = {
+    "economic_event_skip": "scheduled macro event",
+    "earnings_skip":       "earnings within window",
+    "low_iv_rank":         "IV rank below floor",
+    "negative_news":       "negative news sentiment",
+    "no_snapshot":         "no market data",
+    "no_contracts":        "no contracts in DTE band",
+    "no_contract_in_envelope": "no contracts in delta band",
+    "already_open":        "position already open",
+    "rejected_by_llm":     "rejected by Claude",
+    "recent_failure_skip": "broker rejected recently",
+}
+
+
+def _strategist_skip_summary(events: list[dict[str, Any]],
+                              cutoff: Any) -> str:
+    """Build "Strategist skipped: <reason>" for the cycle ending at
+    ``cutoff`` (the Guardrail final-summary timestamp). Returns an
+    empty string if we can't determine a useful reason.
+
+    Strategy:
+      * Tally SELECTION events from the most recent cycle by outcome.
+      * If one outcome dominates (>= 70% of the count) surface it; if
+        it was economic_event_skip, include the event name.
+      * Otherwise list the top 2-3 outcomes so the user knows the
+        ticker list got cut for mixed reasons.
+    """
+    from collections import Counter
+    counts: Counter[str] = Counter()
+    event_label = ""
+    # SELECTIONs fire BEFORE the cycle's DECIDE. So "this cycle"'s
+    # SELECTIONs live in the interval (prev_decide_ts, latest_decide_ts].
+    # If there's no prior DECIDE in the event window we just take
+    # everything up to the latest DECIDE.
+    latest_decide_ts: Any = None
+    prev_decide_ts: Any = None
+    for e in events:
+        if (e.get("node_name") == "Strategist"
+                and e.get("event_type") == "DECIDE"):
+            if latest_decide_ts is None:
+                latest_decide_ts = e.get("created_at")
+            else:
+                prev_decide_ts = e.get("created_at")
+                break
+    for e in events:
+        if (e.get("node_name") != "Strategist"
+                or e.get("event_type") != "SELECTION"):
+            continue
+        ts = e.get("created_at")
+        if (latest_decide_ts is not None and ts is not None
+                and ts > latest_decide_ts):
+            continue  # SELECTION from a NEWER cycle than the one we care about
+        if (prev_decide_ts is not None and ts is not None
+                and ts <= prev_decide_ts):
+            break  # walked into a prior cycle — stop
+        pl = e.get("payload") or {}
+        outcome = pl.get("outcome") or ""
+        if not outcome or outcome == "approved":
+            continue
+        counts[outcome] += 1
+        if outcome == "economic_event_skip" and not event_label:
+            event_label = str(pl.get("event") or "")
+    if not counts:
+        return ""
+    total = sum(counts.values())
+    top, top_n = counts.most_common(1)[0]
+    if top_n / total >= 0.7:
+        label = _STRATEGIST_OUTCOME_LABELS.get(top, top.replace("_", " "))
+        if top == "economic_event_skip" and event_label:
+            return f"Strategist skipped all {total} ticker(s): {event_label}"
+        return (f"Strategist skipped all {total} ticker(s): {label}")
+    top3 = counts.most_common(3)
+    bits = [f"{_STRATEGIST_OUTCOME_LABELS.get(o, o.replace('_', ' '))}"
+            f" ({n})" for o, n in top3]
+    return f"Strategist skipped {total} ticker(s) — " + ", ".join(bits)
