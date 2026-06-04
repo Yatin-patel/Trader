@@ -77,17 +77,19 @@
   <div class="chart" id="cycles-chart"></div>
 </section>
 
-<div class="grid-2">
-  <!-- Positions -->
-  <section class="panel">
-    <header class="panel-head"><h2>Open Stock Positions</h2></header>
-    <table class="data" id="positions-table">
-      <thead><tr><th>Ticker</th><th>Qty</th><th>Entry</th><th>Current</th><th>P/L</th><th></th></tr></thead>
-      <tbody><tr><td colspan="6" class="empty">No open positions</td></tr></tbody>
-    </table>
-  </section>
+<!-- Positions + Contracts used to share a side-by-side grid-2 wrap.
+     With 10 columns now on the contracts table, splitting the row
+     squeezed the actions cell off-screen. Both panels now stack
+     full-width so every column (and the kebab menu) is reachable. -->
+<section class="panel">
+  <header class="panel-head"><h2>Open Stock Positions</h2></header>
+  <table class="data" id="positions-table">
+    <thead><tr><th>Ticker</th><th>Qty</th><th>Entry</th><th>Current</th><th>P/L</th><th></th></tr></thead>
+    <tbody><tr><td colspan="6" class="empty">No open positions</td></tr></tbody>
+  </table>
+</section>
 
-  <!-- Contracts -->
+<!-- Contracts (own row, full width) -->
   <section class="panel">
     <header class="panel-head">
       <h2>Open Option Contracts</h2>
@@ -152,7 +154,6 @@
     .row-menu .menu-item.warn { color: #b45309; }
     .row-menu .menu-item.warn:hover { background: #fef3c7; }
   </style>
-</div>
 
 <!-- Timeline -->
 <section class="panel">
@@ -267,5 +268,5 @@
   })();
 </script>
 
-<script src="/static/project_dashboard.js?v=9"></script>
+<script src="/static/project_dashboard.js?v=10"></script>
 {% endblock %}
