@@ -905,8 +905,123 @@ class ETradeClient(BrokerClient):
                            else "GOOD_FOR_DAY"),
         )
 
-    def _submit_order(self, *, order_type: str, product: dict[str, Any],
-                      order_action: str, qty: int,
+    # ---------------- Multi-leg (atomic, no partial-fill risk) ----------
+
+    def supports_multi_leg(self) -> bool:
+        # ETrade /v1/accounts/{id}/orders/{preview,place} supports
+        # SPREADS, IRON_CONDOR, CONDOR, CALENDAR, BUTTERFLY, etc. as a
+        # single atomic order. We cover SPREADS + IRON_CONDOR + CONDOR
+        # because those are what the strategy_dispatcher emits.
+        return True
+
+    def _occ_to_product(self, occ: str) -> dict[str, Any]:
+        """Decompose an OCC option symbol into ETrade's Product dict."""
+        m = re.match(
+            r"^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$",
+            (occ or "").upper(),
+        )
+        if not m:
+            raise ValueError(f"not a valid OCC option symbol: {occ!r}")
+        root, yy, mm, dd, cp, strike_th = m.groups()
+        return {
+            "securityType": "OPTN",
+            "symbol":       root,
+            "callPut":      "CALL" if cp == "C" else "PUT",
+            "expiryYear":   2000 + int(yy),
+            "expiryMonth":  int(mm),
+            "expiryDay":    int(dd),
+            "strikePrice":  f"{int(strike_th) / 1000.0:.6f}",
+        }
+
+    def submit_multi_leg_option(
+        self,
+        legs: list[dict[str, Any]],
+        qty: int,
+        net_limit_price: float,
+        time_in_force: str = "day",
+    ) -> dict[str, Any]:
+        """Submit an atomic multi-leg options order to ETrade.
+
+        ``legs`` is the same broker-agnostic shape AlpacaClient expects:
+            {symbol, side ('buy'|'sell'), ratio_qty, position_intent}
+
+        ``net_limit_price`` follows the OCC convention used by Alpaca:
+        positive = net DEBIT you'll pay, negative = net CREDIT you
+        require. ETrade's API takes a POSITIVE limitPrice and uses
+        ``priceType`` (``NET_CREDIT`` vs ``NET_DEBIT``) to encode
+        direction — we convert here.
+
+        ``orderType`` is inferred from the leg count + call/put mix:
+          2 legs, same C/P                       → SPREADS
+          4 legs, 2 calls + 2 puts (condor)      → IRON_CONDOR
+          4 legs, all same C/P (Christmas tree)  → CONDOR
+        Anything else falls back to SPREADS — ETrade will reject if
+        the legs aren't actually a recognized spread.
+        """
+        if not legs:
+            return {"error": "no legs provided to submit_multi_leg_option"}
+
+        instruments: list[dict[str, Any]] = []
+        call_count = put_count = 0
+        for leg in legs:
+            sym = leg.get("symbol") or ""
+            side = str(leg.get("side") or "").lower()
+            intent = str(leg.get("position_intent") or "").lower()
+            ratio = int(leg.get("ratio_qty") or 1)
+            try:
+                product = self._occ_to_product(sym)
+            except Exception as e:
+                return {"error": f"bad leg symbol {sym!r}: {e}"}
+            if product["callPut"] == "CALL":
+                call_count += 1
+            else:
+                put_count += 1
+            # Map side+intent → ETrade orderAction.
+            if intent.endswith("_open") or not intent:
+                action = ("SELL_OPEN" if side == "sell"
+                          else "BUY_OPEN")
+            else:
+                action = ("SELL_CLOSE" if side == "sell"
+                          else "BUY_CLOSE")
+            instruments.append({
+                "Product":      product,
+                "orderAction":  action,
+                "quantityType": "QUANTITY",
+                "quantity":     int(qty) * ratio,
+            })
+
+        n = len(legs)
+        if n == 4 and call_count == 2 and put_count == 2:
+            order_type = "IRON_CONDOR"
+        elif n == 4 and (call_count == 0 or put_count == 0):
+            order_type = "CONDOR"
+        else:
+            order_type = "SPREADS"
+
+        # ETrade limitPrice is always non-negative; priceType encodes
+        # direction.
+        if net_limit_price < 0:
+            price_type = "NET_CREDIT"
+            limit_price = abs(float(net_limit_price))
+        else:
+            price_type = "NET_DEBIT"
+            limit_price = float(net_limit_price)
+
+        return self._submit_order(
+            order_type=order_type,
+            instruments=instruments,
+            price_type=price_type,
+            limit_price=limit_price,
+            time_in_force=("GOOD_UNTIL_CANCEL"
+                           if str(time_in_force).lower().startswith("g")
+                           else "GOOD_FOR_DAY"),
+        )
+
+    def _submit_order(self, *, order_type: str,
+                      product: dict[str, Any] | None = None,
+                      order_action: str | None = None,
+                      qty: int | None = None,
+                      instruments: list[dict[str, Any]] | None = None,
                       price_type: str, limit_price: float | None,
                       time_in_force: str,
                       market_session: str = "REGULAR"
@@ -914,22 +1029,38 @@ class ETradeClient(BrokerClient):
         """Preview-then-place. ``previewId`` expires in 3 minutes so
         we issue the place call back-to-back. ``clientOrderId`` must
         be unique per account and <=20 chars — we use the first
-        20 hex chars of a fresh uuid4."""
+        20 hex chars of a fresh uuid4.
+
+        Single-leg callers pass ``product`` + ``order_action`` + ``qty``
+        and we wrap them into a one-element Instrument list. Multi-leg
+        callers pass ``instruments`` directly (each entry is a
+        pre-built ``{Product, orderAction, quantityType, quantity}``
+        dict). Either path produces the same Preview/Place envelope —
+        ETrade distinguishes single vs multi by ``orderType``
+        (OPTN vs SPREADS / IRON_CONDOR / CALENDAR / ...).
+        """
         aid = self._require_account()
         client_order_id = uuid.uuid4().hex[:20]
+        if instruments is None:
+            if product is None or order_action is None or qty is None:
+                return {"error": "_submit_order called without "
+                                  "instruments AND without single-leg "
+                                  "product/action/qty"}
+            instruments = [{
+                "Product": product,
+                "orderAction": order_action,
+                "quantityType": "QUANTITY",
+                "quantity": int(qty),
+            }]
         order_body: dict[str, Any] = {
             "allOrNone": False,
             "priceType": price_type,
             "orderTerm": time_in_force,
             "marketSession": market_session,
-            "Instrument": [{
-                "Product": product,
-                "orderAction": order_action,
-                "quantityType": "QUANTITY",
-                "quantity": int(qty),
-            }],
+            "Instrument": instruments,
         }
-        if price_type == "LIMIT" and limit_price is not None:
+        if (price_type in ("LIMIT", "NET_CREDIT", "NET_DEBIT")
+                and limit_price is not None):
             order_body["limitPrice"] = round(float(limit_price), 2)
         preview_envelope = {
             "PreviewOrderRequest": {
@@ -1007,32 +1138,71 @@ class ETradeClient(BrokerClient):
                             or order_id)
                 if order_id:
                     break
-        # Map to the shape the executor / orders_tracker expect.
-        sym = product.get("symbol", "")
-        if product.get("securityType") == "OPTN":
+        # Map to the shape the executor / orders_tracker expect. Single-
+        # leg path keeps the leg-level fields; multi-leg path summarizes
+        # the legs into a single dict + carries leg detail under
+        # ``_legs``.
+        if product is not None and order_action is not None:
+            sym = product.get("symbol", "")
+            if product.get("securityType") == "OPTN":
+                try:
+                    sym = _etrade_to_occ(
+                        sym,
+                        int(product.get("expiryYear") or 0),
+                        int(product.get("expiryMonth") or 0),
+                        int(product.get("expiryDay") or 0),
+                        product.get("callPut") or "PUT",
+                        _as_float(product.get("strikePrice")),
+                    )
+                except Exception:
+                    pass
+            return {
+                "id":     str(order_id),
+                "symbol": sym,
+                "qty":    float(qty or 0),
+                "side":   order_action.split("_")[0].lower(),
+                "type":   price_type.lower(),
+                "limit_price": (round(float(limit_price), 2)
+                                if limit_price is not None else None),
+                "status": "accepted",
+                "submitted_at": datetime.now(tz=timezone.utc),
+                "_etrade_preview_id": preview_id,
+                "_etrade_order_action": order_action,
+            }
+        # Multi-leg path.
+        leg_summaries = []
+        for instr in (instruments or []):
+            p = instr.get("Product") or {}
             try:
-                sym = _etrade_to_occ(
-                    sym,
-                    int(product.get("expiryYear") or 0),
-                    int(product.get("expiryMonth") or 0),
-                    int(product.get("expiryDay") or 0),
-                    product.get("callPut") or "PUT",
-                    _as_float(product.get("strikePrice")),
+                leg_sym = _etrade_to_occ(
+                    p.get("symbol", ""),
+                    int(p.get("expiryYear") or 0),
+                    int(p.get("expiryMonth") or 0),
+                    int(p.get("expiryDay") or 0),
+                    p.get("callPut") or "PUT",
+                    _as_float(p.get("strikePrice")),
                 )
             except Exception:
-                pass
+                leg_sym = p.get("symbol", "")
+            leg_summaries.append({
+                "symbol":      leg_sym,
+                "orderAction": instr.get("orderAction"),
+                "quantity":    instr.get("quantity"),
+            })
         return {
-            "id": str(order_id),
-            "symbol": sym,
-            "qty": float(qty),
-            "side": order_action.split("_")[0].lower(),
-            "type": price_type.lower(),
+            "id":     str(order_id),
+            "symbol": ",".join(leg["symbol"] for leg in leg_summaries),
+            "qty":    float(
+                (instruments or [{}])[0].get("quantity") or 0),
+            "side":   "multi",
+            "type":   price_type.lower(),
             "limit_price": (round(float(limit_price), 2)
                             if limit_price is not None else None),
             "status": "accepted",
             "submitted_at": datetime.now(tz=timezone.utc),
             "_etrade_preview_id": preview_id,
-            "_etrade_order_action": order_action,
+            "_etrade_order_type":  order_type,
+            "_legs": leg_summaries,
         }
 
     # ---------------- Market schedule ------------------------------------
