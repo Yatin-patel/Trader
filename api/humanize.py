@@ -108,6 +108,15 @@ def humanize_event(event: dict[str, Any]) -> dict[str, Any]:
                 message = f"Market closed — sleeping {wait}s"
             else:
                 message = "Market closed"
+        elif payload.get("skipped") == "broker_reauth_required":
+            # ETrade tokens past the 24h midnight ET window. Worker is
+            # alive but can't run a cycle until /etrade/connect is
+            # re-done. NOT an error — it's a clean wait-state.
+            icon, kind = "🔌", "closed"
+            message = (
+                "Broker reconnect required — cycles paused until the "
+                "user re-authorizes ETrade via /etrade/connect."
+            )
         else:
             icon, kind = "🔁", "cycle"
             message = (

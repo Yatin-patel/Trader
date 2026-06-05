@@ -2230,14 +2230,19 @@ def _build_snapshot(project_id: str, user_id: str | None = None,
         )
     else:
         try:
-            from execution import get_broker
+            from execution import BrokerReauthRequired, get_broker
             client = get_broker(project)
             try:
                 account.update(client.get_account())
+            except BrokerReauthRequired as e:
+                # Tokens past renewal window. Distinct UI state so the
+                # warning reads "Reconnect ETrade" instead of the generic
+                # "account unreachable / HTTP 401".
+                broker_state = "needs_reauth"
+                account["error"] = str(e)
             except BrokerNotConfigured as e:
-                # Most common ETrade case: OAuth done but no
-                # accountIdKey could be resolved. UI surfaces a
-                # Reconnect button.
+                # OAuth done but no accountIdKey could be resolved, or
+                # credentials missing entirely.
                 broker_state = "needs_oauth"
                 account["error"] = str(e)
             except Exception as e:
@@ -2247,12 +2252,20 @@ def _build_snapshot(project_id: str, user_id: str | None = None,
                 for k in ("next_open", "next_close", "timestamp"):
                     if clock.get(k) is not None:
                         clock[k] = str(clock[k])
+            except BrokerReauthRequired:
+                # Already surfaced via the account error above.
+                pass
             except Exception as e:
                 clock["error"] = str(e)
             try:
                 positions_live = client.list_positions()
+            except BrokerReauthRequired:
+                positions_live = []
             except Exception:
                 positions_live = []
+        except BrokerReauthRequired as e:
+            broker_state = "needs_reauth"
+            account["error"] = str(e)
         except BrokerNotConfigured as e:
             broker_state = "needs_oauth"
             account["error"] = str(e)
@@ -2328,17 +2341,29 @@ def _build_snapshot(project_id: str, user_id: str | None = None,
         "greeks": greeks,
         "risk_limits": risk_limits,
         "recent_breach": recent_breach,
-        "warnings": _build_warnings(account, clock, raw_events, project),
+        "warnings": _build_warnings(account, clock, raw_events, project,
+                                    broker_state),
     }
 
 
 def _build_warnings(account: dict[str, Any], clock: dict[str, Any],
-                    events: list[dict[str, Any]], project: Any) -> list[dict[str, str]]:
+                    events: list[dict[str, Any]], project: Any,
+                    broker_state: str = "ready") -> list[dict[str, str]]:
     warns: list[dict[str, str]] = []
     broker_type = (getattr(project, "broker_type", "alpaca") or "alpaca")
 
     if account.get("error"):
-        if broker_type == "etrade" and not getattr(
+        if broker_state == "needs_reauth" and broker_type == "etrade":
+            # Tokens past renewal window — show a clear "Reconnect"
+            # call-to-action instead of "account unreachable / HTTP 401".
+            # The detail string from BrokerReauthRequired already
+            # includes the explanation + the /etrade/connect URL.
+            warns.append({
+                "level": "warn",
+                "title": "Reconnect ETrade",
+                "detail": account["error"],
+            })
+        elif broker_type == "etrade" and not getattr(
                 project, "etrade_access_token", ""):
             warns.append({
                 "level": "info",

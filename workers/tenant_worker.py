@@ -32,7 +32,7 @@ except Exception:
 
 from db.repositories import EventsRepo, ProjectsRepo
 from db.settings_store import AppSettings, ProjectSettings
-from execution import BrokerClient, get_broker
+from execution import BrokerClient, BrokerReauthRequired, get_broker
 from orchestration import build_graph
 
 logger = logging.getLogger(__name__)
@@ -179,6 +179,17 @@ class TenantWorker:
         """Run one cycle if the market is open; otherwise return seconds to wait."""
         try:
             return await self._run_one_cycle()
+        except BrokerReauthRequired as e:
+            # ETrade tokens past renewal — the cycle can't possibly run
+            # without re-OAuth. Log a clean LOOP-skip (NOT an ERROR) so
+            # the activity feed shows "waiting for reconnect" rather
+            # than a stream of stack traces, and so the watchdog
+            # doesn't try to restart a worker that's actually healthy.
+            EventsRepo.log(self.project_id, "Worker", "LOOP", {
+                "skipped": "broker_reauth_required",
+                "detail": str(e),
+            })
+            return max(self._cycle_interval(), 300)
         except Exception as e:
             logger.exception("cycle failed for %s: %s", self.project_id, e)
             EventsRepo.log(self.project_id, "Worker", "ERROR", {"err": str(e)})
@@ -220,6 +231,17 @@ class TenantWorker:
         # MultiTenantRunner scheduler, not from this per-tenant worker.)
 
         client = get_broker(project)
+
+        # --- Broker auth pre-flight ------------------------------------------
+        # One light call to surface BrokerReauthRequired BEFORE the
+        # graph runs. Otherwise Scanner / Strategist / Guardrail each
+        # independently hit the broker, each catches the exception, and
+        # the activity feed gets three duplicate ERROR rows for what is
+        # really a single "tokens expired" condition. The exception
+        # propagates up to _tick() which logs a single clean LOOP-skip.
+        # On a healthy broker this is one balance.json round-trip per
+        # cycle (~200ms) — negligible vs the agent work that follows.
+        client.get_account()
 
         # --- HARD GATE: market hours -----------------------------------------
         # Allow the cycle if either:

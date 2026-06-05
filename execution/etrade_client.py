@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 from db.repositories import TradingProject
 
-from .base import BrokerClient, BrokerNotConfigured
+from .base import BrokerClient, BrokerNotConfigured, BrokerReauthRequired
 
 logger = logging.getLogger(__name__)
 
@@ -221,9 +221,80 @@ class ETradeClient(BrokerClient):
                       if project.etrade_environment == "production"
                       else SANDBOX_BASE)
         self._account_id_key = project.etrade_account_id_key or ""
+        # Process-wide flag so the auto-renew path only fires once per
+        # request — if renewal fails we don't want to thrash the renew
+        # endpoint on every retry.
+        self._reauth_failed = False
 
     def _url(self, path: str) -> str:
         return f"{self._base}{path}"
+
+    # ---------------- HTTP wrapper with auto-renew -----------------------
+
+    def _is_oauth_expired(self, resp) -> bool:
+        """ETrade signals an expired access token with HTTP 401 and a
+        body containing ``oauth_problem=token_expired``. Treat any 401
+        with that marker as renewable. Other 401s (bad signature,
+        revoked consumer key) are NOT renewable — bubble them up so the
+        user sees the real problem instead of looping renewals."""
+        if resp.status_code != 401:
+            return False
+        try:
+            txt = resp.text or ""
+        except Exception:
+            return False
+        return "token_expired" in txt.lower()
+
+    def _try_renew(self) -> bool:
+        """Attempt to renew the access token via /oauth/renew_access_token.
+        Returns True only when ETrade returns 200 — anything else means
+        the user must re-do the full OAuth handshake."""
+        if self._reauth_failed:
+            return False
+        ok = renew_access_token(
+            self.project.etrade_consumer_key,
+            self.project.etrade_consumer_secret,
+            self.project.etrade_access_token,
+            self.project.etrade_access_token_secret,
+        )
+        if not ok:
+            self._reauth_failed = True
+        return ok
+
+    def _raise_reauth(self) -> None:
+        env = "production" if self.project.etrade_environment == "production" \
+            else "sandbox"
+        raise BrokerReauthRequired(
+            f"ETrade ({env}) access tokens have expired and could not "
+            f"be renewed. Visit /etrade/connect to reconnect this "
+            f"project — ETrade tokens expire daily at midnight US "
+            f"Eastern and need a fresh OAuth authorization after that."
+        )
+
+    def _request(self, method: str, url: str, **kwargs):
+        """Single point all HTTP calls funnel through. On 401-with-
+        token_expired, transparently renew once and retry. On
+        unrenewable 401, raise BrokerReauthRequired so the UI / worker
+        can show a 'Reconnect ETrade' state instead of a raw HTTP error."""
+        resp = self._session.request(method, url, **kwargs)
+        if self._is_oauth_expired(resp):
+            if self._try_renew():
+                # tokens are still in-window — retry the original call once
+                resp = self._session.request(method, url, **kwargs)
+                if self._is_oauth_expired(resp):
+                    # second 401 after a successful renew → something
+                    # else is wrong (signature, revoked key); fall
+                    # through and let the caller see the body
+                    pass
+            else:
+                self._raise_reauth()
+        return resp
+
+    def _get(self, url: str, **kwargs):
+        return self._request("GET", url, **kwargs)
+
+    def _post(self, url: str, **kwargs):
+        return self._request("POST", url, **kwargs)
 
     def _require_account(self) -> str:
         """Lazy-resolve the accountIdKey when the project DB row is
@@ -286,10 +357,12 @@ class ETradeClient(BrokerClient):
         user has access to. Used by the connect flow + the lazy
         accountIdKey resolver above."""
         try:
-            r = self._session.get(
+            r = self._get(
                 self._url("/v1/accounts/list.json"),
                 headers=_JSON_HEADERS, timeout=20,
             )
+        except BrokerReauthRequired:
+            raise
         except Exception as e:
             logger.warning("etrade /accounts/list failed: %s", e)
             return []
@@ -329,12 +402,14 @@ class ETradeClient(BrokerClient):
         """
         aid = self._require_account()
         try:
-            r = self._session.get(
+            r = self._get(
                 self._url(f"/v1/accounts/{aid}/balance.json"),
                 params={"instType": "BROKERAGE", "realTimeNAV": "true"},
                 headers=_JSON_HEADERS,
                 timeout=20,
             )
+        except BrokerReauthRequired:
+            raise
         except Exception as e:
             return {"error": f"network error: {e}"}
         if r.status_code != 200:
@@ -377,12 +452,14 @@ class ETradeClient(BrokerClient):
         if not self._account_id_key:
             return {"error": "no account selected"}
         try:
-            r = self._session.get(
+            r = self._get(
                 self._url(
                     f"/v1/accounts/{self._account_id_key}/balance.json"),
                 params={"instType": "BROKERAGE", "realTimeNAV": "true"},
                 headers=_JSON_HEADERS, timeout=20,
             )
+        except BrokerReauthRequired:
+            raise
         except Exception as e:
             return {"error": str(e)}
         if r.status_code != 200:
@@ -398,11 +475,13 @@ class ETradeClient(BrokerClient):
         Product.securityType; shorts come through with negative qty."""
         aid = self._require_account()
         try:
-            r = self._session.get(
+            r = self._get(
                 self._url(f"/v1/accounts/{aid}/portfolio.json"),
                 params={"count": 250},
                 headers=_JSON_HEADERS, timeout=30,
             )
+        except BrokerReauthRequired:
+            raise
         except Exception as e:
             logger.warning("etrade portfolio fetch failed: %s", e)
             return []
@@ -525,11 +604,13 @@ class ETradeClient(BrokerClient):
             chunk = syms[i:i + 25]
             joined = ",".join(chunk)
             try:
-                r = self._session.get(
+                r = self._get(
                     self._url(f"/v1/market/quote/{joined}.json"),
                     params={"detailFlag": "INTRADAY"},
                     headers=_JSON_HEADERS, timeout=20,
                 )
+            except BrokerReauthRequired:
+                raise
             except Exception as e:
                 logger.warning("etrade snapshots batch failed: %s", e)
                 continue
@@ -615,11 +696,13 @@ class ETradeClient(BrokerClient):
             params["expiryMonth"] = expiration.month
             params["expiryDay"] = expiration.day
         try:
-            r = self._session.get(
+            r = self._get(
                 self._url("/v1/market/optionchains.json"),
                 params=params,
                 headers=_JSON_HEADERS, timeout=30,
             )
+        except BrokerReauthRequired:
+            raise
         except Exception as e:
             logger.warning("etrade optionchains failed: %s", e)
             return {}
@@ -856,11 +939,13 @@ class ETradeClient(BrokerClient):
             }
         }
         try:
-            pr = self._session.post(
+            pr = self._post(
                 self._url(f"/v1/accounts/{aid}/orders/preview.json"),
                 data=json.dumps(preview_envelope),
                 headers=_JSON_POST_HEADERS, timeout=20,
             )
+        except BrokerReauthRequired:
+            raise
         except Exception as e:
             return {"error": f"preview network error: {e}"}
         if pr.status_code != 200:
@@ -891,11 +976,13 @@ class ETradeClient(BrokerClient):
             }
         }
         try:
-            plr = self._session.post(
+            plr = self._post(
                 self._url(f"/v1/accounts/{aid}/orders/place.json"),
                 data=json.dumps(place_envelope),
                 headers=_JSON_POST_HEADERS, timeout=20,
             )
+        except BrokerReauthRequired:
+            raise
         except Exception as e:
             return {"error": f"place network error: {e}",
                     "preview_id": preview_id}

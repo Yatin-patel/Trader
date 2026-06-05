@@ -101,3 +101,12 @@ class BrokerClient(abc.ABC):
 class BrokerNotConfigured(RuntimeError):
     """Raised when an adapter's credentials are missing or expired.
     UI catches this and shows a reconnect button."""
+
+
+class BrokerReauthRequired(BrokerNotConfigured):
+    """Subclass of BrokerNotConfigured for the specific case where the
+    user previously connected the broker but its OAuth tokens are now
+    past renewal — they need to walk through the connect flow again.
+    Distinguishing this from a never-configured broker lets the UI show
+    'Reconnect ETrade' rather than 'Connect ETrade' and lets the
+    worker log a clean LOOP-skip event instead of a generic ERROR."""

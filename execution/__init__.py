@@ -1,5 +1,5 @@
 from .alpaca_client import AlpacaClient
-from .base import BrokerClient, BrokerNotConfigured
+from .base import BrokerClient, BrokerNotConfigured, BrokerReauthRequired
 from .etrade_client import ETradeClient
 
 
@@ -19,4 +19,4 @@ def get_broker(project) -> BrokerClient:
 
 
 __all__ = ["AlpacaClient", "ETradeClient", "BrokerClient",
-           "BrokerNotConfigured", "get_broker"]
+           "BrokerNotConfigured", "BrokerReauthRequired", "get_broker"]
