@@ -115,6 +115,20 @@ def execute_orders_node(state: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             logger.exception("pdt guard check failed; allowing trade")
 
+    # Daily-drawdown circuit breaker. When today's net P&L (realized +
+    # unrealized) has crossed −max_daily_drawdown_pct of prior close
+    # equity, BLOCK every new open this cycle. Existing positions can
+    # still close (take-profit / stop-loss run in the worker before
+    # this point and aren't affected). The breaker resets at UTC
+    # midnight via the cache TTL inside drawdown_guard.
+    dd_paused = False
+    dd_reason = ""
+    try:
+        from risk.drawdown_guard import should_pause_opens
+        dd_paused, dd_reason = should_pause_opens(project_id)
+    except Exception:
+        logger.exception("drawdown guard check failed; allowing trade")
+
     # Snapshot of strategy params at trade time — copied onto each
     # opened contract for later attribution analysis.
     settings_snapshot = {
@@ -148,6 +162,17 @@ def execute_orders_node(state: dict[str, Any]) -> dict[str, Any]:
 
     for trade in trades:
         try:
+            # Drawdown circuit-breaker pre-check on EVERY trade. We
+            # block opens uniformly across all types (CSP, CC,
+            # spreads, intraday) so the breaker is a true day-stop —
+            # not a wheel-only one. Closes / rolls run in the worker
+            # before this point and aren't affected.
+            if dd_paused:
+                results.append({
+                    "trade": trade, "status": "REJECTED",
+                    "reason": "drawdown_breaker: " + dd_reason,
+                })
+                continue
             if trade["type"] == "CSP":
                 if dry_run:
                     results.append({"trade": trade, "status": "DRY_RUN", "qty": csp_qty})

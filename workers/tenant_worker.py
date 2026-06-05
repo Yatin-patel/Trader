@@ -305,10 +305,19 @@ class TenantWorker:
         except Exception as e:
             logger.exception("analytics step failed: %s", e)
 
-        # --- Position management: take-profit + auto-roll --------------------
+        # --- Position management: defense layer + take-profit + auto-roll ---
+        # Order matters. We run defensive risk BEFORE take-profit so a
+        # tested short gets either stop-loss-closed or rolled before the
+        # take-profit check, which can prevent both from firing on the
+        # same contract in the same cycle.
         try:
+            from risk.option_stop_loss import evaluate_stop_loss
+            from risk.defensive_roll import evaluate_defensive_roll
             from risk.take_profit import evaluate_take_profit
             from risk.auto_roll import evaluate_auto_roll
+            await asyncio.to_thread(evaluate_stop_loss, self.project_id)
+            await asyncio.to_thread(
+                evaluate_defensive_roll, self.project_id)
             await asyncio.to_thread(evaluate_take_profit, self.project_id)
             await asyncio.to_thread(evaluate_auto_roll, self.project_id)
         except Exception as e:

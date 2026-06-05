@@ -248,6 +248,16 @@ class ProjectSettings:
         "0dte_stop_loss_pct":            (0.50,    "float",  "Per-trade stop-loss for 0DTE/1DTE long-option opens, as a fraction of entry price. 0.50 = exit when the option is down 50% from entry."),
         "intraday_rsi_oversold":         (30,      "int",    "RSI threshold below which the intraday scanner flags an oversold (BUY-signal) condition. Lower = stricter, fewer but stronger signals. 14-period RSI; 30 is the textbook default."),
         "intraday_rsi_overbought":       (70,      "int",    "RSI threshold above which the scanner flags an overbought (SELL-signal) condition. Mirrors intraday_rsi_oversold."),
+        # --- Defensive risk management (loss prevention) -----------------
+        "option_stop_loss_enabled":      (True,    "bool",   "Master switch for the option stop-loss. When true, any short option whose mid-price has reached option_stop_loss_multiple × the credit you originally received is auto-bought-back to cap the loss. The default cuts catastrophic short-option blow-ups before they undo weeks of premium."),
+        "option_stop_loss_multiple":     (2.0,     "float",  "Stop-loss trigger as a multiple of premium received. 2.0 = close when the option costs 2× what you sold it for (industry-standard 'max defensive loss' for credit trades). 1.5 = tighter. 3.0 = looser. Below 1.0 disables (would close at gain, which is what take-profit is for)."),
+        "drawdown_breaker_enabled":      (True,    "bool",   "Master switch for the daily-drawdown circuit breaker. When true, new option opens PAUSE for the rest of the trading day once today's total P/L (realized + unrealized) breaches max_daily_drawdown_pct of prior-close equity. Existing positions can still close (take-profit / stop-loss / manual). Resets at UTC midnight."),
+        "max_daily_drawdown_pct":        (0.03,    "float",  "Daily-drawdown trigger as a fraction of prior-close equity. 0.03 = pause new opens when down 3%. The breaker is asymmetric on purpose: better to miss a good setup on a bad day than to keep adding to a losing pile."),
+        "defensive_roll_enabled":        (True,    "bool",   "Master switch for the defensive-roll module. When true, short options that are uncomfortable (high delta + low DTE) but not yet at the hard stop-loss get rolled down/up + out for a credit — converts a loser-in-progress into a future winner."),
+        "defensive_roll_delta_threshold": (0.50,   "float",  "Roll a short option when its absolute delta crosses this threshold (default 0.50 = at-the-money). Lower = more aggressive defense, more rolls. Higher = only roll truly tested positions."),
+        "defensive_roll_max_dte":        (14,      "int",    "Only roll positions with DTE ≤ this. Past this window, theta isn't worth the gamma any more."),
+        "defensive_roll_target_dte":     (30,      "int",    "Roll out to ~this many days. Picks the new strike near defensive_roll_strike_offset_pct OTM."),
+        "defensive_roll_strike_offset_pct": (0.05, "float",  "How much OTM to roll the strike to, as a fraction of current underlying price (e.g. 0.05 = roll a tested put down to 5% below spot)."),
     }
 
     # Display grouping for the project settings panel. Each group has a
@@ -328,6 +338,22 @@ class ProjectSettings:
                 "min_iv_rank",
                 "avoid_earnings_within_dte",
                 "recent_failure_skip_minutes",
+            ],
+        },
+        {
+            "id":    "defense",
+            "title": "Loss Prevention (Defensive Risk)",
+            "subtitle": "Stop-losses, daily drawdown circuit breaker, and defensive rolls — the brakes that prevent realized winners from being wiped out by unrealized losses.",
+            "keys": [
+                "option_stop_loss_enabled",
+                "option_stop_loss_multiple",
+                "drawdown_breaker_enabled",
+                "max_daily_drawdown_pct",
+                "defensive_roll_enabled",
+                "defensive_roll_delta_threshold",
+                "defensive_roll_max_dte",
+                "defensive_roll_target_dte",
+                "defensive_roll_strike_offset_pct",
             ],
         },
         {
