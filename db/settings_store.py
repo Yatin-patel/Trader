@@ -233,7 +233,16 @@ class ProjectSettings:
         "calendar_short_dte":            (14,      "int",    "Target DTE for the calendar's short (near-month) leg."),
         "calendar_long_dte":             (45,      "int",    "Target DTE for the calendar's long (back-month) leg."),
         # --- Intraday / day-trading -----------------------------------------
+        # Toggles that gate the intraday momentum strategist (only consulted
+        # when strategy_mode='intraday_momentum').
+        "intraday_scanner_enabled":      (False,   "bool",   "Master switch for the intraday RSI/MACD/VWAP scanner. Must be true (along with allow_0dte and/or allow_1dte) for the intraday_momentum strategy_mode to open any trades. The Optimize-Now button flips this to true automatically when you pick intraday_momentum."),
+        "allow_0dte":                    (False,   "bool",   "Allow the day-trading strategist to buy 0DTE (same-day expiration) long calls/puts. HIGH variance — gamma is large, slippage is large, theta is brutal. Default off; opt in explicitly."),
+        "allow_1dte":                    (False,   "bool",   "Allow the day-trading strategist to buy 1DTE (expires next trading day) long calls/puts. Lower variance than 0DTE but still day-trade territory. Default off."),
         "intraday_max_trades_per_cycle": (3,       "int",    "Hard cap on how many 0DTE/1DTE trades the strategist will open per cycle. Independent of the PDT 5-day window cap."),
+        "0dte_profit_target_pct":        (0.30,    "float",  "Per-trade profit target for 0DTE/1DTE long-option opens, as a fraction of entry price. 0.30 = exit when the option is up 30% from entry. Take-profit logic uses this to auto-close intraday winners."),
+        "0dte_stop_loss_pct":            (0.50,    "float",  "Per-trade stop-loss for 0DTE/1DTE long-option opens, as a fraction of entry price. 0.50 = exit when the option is down 50% from entry."),
+        "intraday_rsi_oversold":         (30,      "int",    "RSI threshold below which the intraday scanner flags an oversold (BUY-signal) condition. Lower = stricter, fewer but stronger signals. 14-period RSI; 30 is the textbook default."),
+        "intraday_rsi_overbought":       (70,      "int",    "RSI threshold above which the scanner flags an overbought (SELL-signal) condition. Mirrors intraday_rsi_oversold."),
     }
 
     @classmethod
