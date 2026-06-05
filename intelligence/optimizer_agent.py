@@ -118,6 +118,7 @@ _PLAN_MAX_REL_STEP: dict[str, float] = {
 # not in this list is left for human review even if the LLM suggests
 # changing it.
 _AUTO_APPLY_BOUNDS: dict[str, tuple[float, float]] = {
+    # --- Wheel (CSP + CC) -----------------------------------------------
     "csp_delta_min":           (0.05, 0.45),
     "csp_delta_max":           (0.15, 0.60),
     "csp_min_dte":             (0,    21),
@@ -133,6 +134,21 @@ _AUTO_APPLY_BOUNDS: dict[str, tuple[float, float]] = {
     # hurt if it goes from 1 → 3 without operator review. Excluded.
     # max_concentration_per_ticker / per_sector are risk caps. Excluded.
     # take_profit_enabled is a bool: leave to humans.
+    # --- Multi-leg spreads ---------------------------------------------
+    # delta on the SHORT leg of the spread / iron condor.
+    "spread_target_delta":     (0.10, 0.50),
+    # USD dollar width between legs (or wing width for an iron condor).
+    "spread_width":            (1.0,  20.0),
+    "spread_min_dte":          (0,    30),
+    "spread_max_dte":          (5,    90),
+    # --- Calendar spread ------------------------------------------------
+    "calendar_short_dte":      (1,    30),
+    "calendar_long_dte":       (30,   120),
+    # --- Day-trading (intraday momentum) -------------------------------
+    # Hard cap on per-cycle 0DTE/1DTE opens. PDT 5-day window cap is
+    # enforced independently in agents/executor.py — this just keeps
+    # the open-count sane within a single cycle.
+    "intraday_max_trades_per_cycle": (1, 10),
 }
 
 def _safe_to_apply(key: str, old: Any, new: Any,

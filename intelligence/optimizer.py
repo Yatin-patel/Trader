@@ -75,6 +75,75 @@ def _tier_overrides(tier: str) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Mode-specific seed defaults — used when the user clicks Optimize on a
+# project running spreads / day-trading. These don't override the cash-
+# tier risk caps above (those still apply); they fill in the spread /
+# intraday knobs the wheel templates don't carry, so the user doesn't
+# have to hand-tune spread_target_delta / spread_width / etc. on first
+# run.
+# ---------------------------------------------------------------------------
+def _mode_overrides(strategy_mode: str, tier: str) -> dict[str, Any]:
+    mode = (strategy_mode or "wheel").lower()
+    if mode in ("wheel", "wheel_plus_dca", "dca_only", "paused", ""):
+        return {}
+
+    # Tier shapes spread width — tiny/small accounts can't afford a
+    # $20 spread, large accounts get more credit from wider wings.
+    width_by_tier = {
+        "tiny": 1.0, "small": 2.5, "medium": 5.0, "large": 10.0,
+    }
+    width = width_by_tier.get(tier, 5.0)
+
+    if mode in ("bull_put_spread", "bear_call_spread"):
+        # CREDIT verticals: short ~0.25 delta, wing ``width`` away.
+        return {
+            "spread_target_delta": 0.25,
+            "spread_width":        width,
+            "spread_min_dte":      21,
+            "spread_max_dte":      45,
+        }
+    if mode in ("bull_call_spread", "bear_put_spread"):
+        # DEBIT verticals: closer-to-ATM long, OTM short.
+        return {
+            "spread_target_delta": 0.50,
+            "spread_width":        width,
+            "spread_min_dte":      21,
+            "spread_max_dte":      45,
+        }
+    if mode == "iron_condor":
+        # Same shape as a credit vertical for each wing; the strategy
+        # builds both put + call sides automatically.
+        return {
+            "spread_target_delta": 0.20,
+            "spread_width":        width,
+            "spread_min_dte":      28,
+            "spread_max_dte":      45,
+        }
+    if mode == "calendar_spread":
+        return {
+            "calendar_short_dte":   14,
+            "calendar_long_dte":    45,
+            "calendar_option_type": "call",
+            "spread_width":         0.0,
+        }
+    if mode == "intraday_momentum":
+        # Default to 1DTE only — 0DTE is high-variance, opt in explicitly.
+        # Trades-per-cycle scales with tier (PDT-safe accounts can take
+        # more swings).
+        per_cycle_by_tier = {
+            "tiny": 1, "small": 1, "medium": 3, "large": 5,
+        }
+        return {
+            "allow_0dte":                    False,
+            "allow_1dte":                    True,
+            "intraday_scanner_enabled":      True,
+            "intraday_max_trades_per_cycle": per_cycle_by_tier.get(
+                tier, 3),
+        }
+    return {}
+
+
 def preview(project_id: str, strategy_id: str) -> dict[str, Any]:
     """Return the settings that would be applied, without saving anything."""
     project = ProjectsRepo.get(project_id)
@@ -116,13 +185,29 @@ def preview(project_id: str, strategy_id: str) -> dict[str, Any]:
 
     tier = _cash_tier(cash)
 
-    # Compose: template settings, then tier overrides (tier wins).
+    # Compose layers (later wins):
+    #   1. Strategy template baseline
+    #   2. Cash-tier risk caps (concentration, collateral, contracts_per_csp)
+    #   3. Mode-specific seed defaults (spread width / delta / DTE,
+    #      intraday flags) — only fills in keys the wheel-template
+    #      doesn't carry; tier risk caps remain authoritative.
+    strategy_mode = str(ProjectSettings.get(
+        project_id, "strategy_mode", default="wheel") or "wheel").lower()
     combined: dict[str, Any] = dict(tpl["settings"])
     combined.update(_tier_overrides(tier))
+    combined.update(_mode_overrides(strategy_mode, tier))
 
     notes = _tier_notes(tier, cash, bp, combined)
     if note:
         notes = [note] + notes
+    if strategy_mode not in ("wheel", "wheel_plus_dca", "dca_only",
+                             "paused", ""):
+        notes.append(
+            f"strategy_mode='{strategy_mode}': also seeded mode-"
+            f"specific defaults (spread/intraday knobs) so this mode "
+            f"is executable without hand-tuning. Continuous Optimizer "
+            f"will keep refining them from live P&L."
+        )
 
     return {
         "strategy": tpl["name"],
@@ -130,6 +215,7 @@ def preview(project_id: str, strategy_id: str) -> dict[str, Any]:
         "cash": cash,
         "buying_power": bp,
         "tier": tier,
+        "strategy_mode": strategy_mode,
         "broker_type": broker_type,
         "broker_state": "needs_oauth" if (broker_type == "etrade"
                         and not getattr(project, "etrade_access_token", ""))

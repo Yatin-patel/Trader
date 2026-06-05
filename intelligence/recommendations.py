@@ -22,16 +22,77 @@ from db.settings_store import ProjectSettings
 logger = logging.getLogger(__name__)
 
 
-_TUNABLE = [
+# Always-tunable knobs (wheel + cross-strategy risk controls). The
+# Optimizer Agent can always touch these regardless of strategy_mode.
+_TUNABLE_WHEEL = [
     "csp_delta_min", "csp_delta_max", "csp_min_dte", "csp_max_dte",
     "cc_delta_min", "cc_delta_max", "scanner_min_pct_change",
     "stop_loss_dollars", "max_collateral_pct", "contracts_per_csp",
     "take_profit_enabled", "close_at_profit_pct", "min_iv_rank",
 ]
 
+# Additional knobs unlocked when strategy_mode is one of the
+# multi-leg spread modes. The wheel knobs above STAY in the candidate
+# list because most risk caps + scanner gates apply to every mode.
+_TUNABLE_SPREAD = [
+    "spread_target_delta", "spread_width",
+    "spread_min_dte", "spread_max_dte",
+]
+_TUNABLE_CALENDAR = [
+    "calendar_short_dte", "calendar_long_dte",
+]
 
-def _current_settings(project_id: str) -> dict[str, Any]:
-    return {k: ProjectSettings.get(project_id, k) for k in _TUNABLE}
+# Day-trading knobs.
+_TUNABLE_INTRADAY = [
+    "intraday_max_trades_per_cycle",
+]
+
+
+_SPREAD_MODES = {
+    "bull_put_spread", "bear_call_spread",
+    "bull_call_spread", "bear_put_spread",
+    "iron_condor",
+}
+
+
+def _tunable_keys(strategy_mode: str) -> list[str]:
+    """Return the set of setting keys the Optimizer Agent is allowed to
+    suggest changes for, scoped to the project's current strategy_mode.
+
+    Always includes the wheel + cross-strategy knobs (risk caps apply
+    everywhere). Adds spread / calendar / intraday knobs only when
+    the project is actually running that mode — otherwise the LLM
+    would propose changes to settings the strategy doesn't read."""
+    keys = list(_TUNABLE_WHEEL)
+    mode = (strategy_mode or "wheel").lower()
+    if mode in _SPREAD_MODES:
+        keys += _TUNABLE_SPREAD
+    if mode == "calendar_spread":
+        # Calendar uses BOTH the spread sizing knobs (target_delta /
+        # width via the spread_* settings on the back-month leg) AND
+        # the specific calendar DTE knobs.
+        keys += _TUNABLE_SPREAD + _TUNABLE_CALENDAR
+    if mode == "intraday_momentum":
+        keys += _TUNABLE_INTRADAY
+    # De-dup while preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
+# Back-compat: a few call sites import _TUNABLE directly. Keep it
+# pointing at the wheel-mode default so they don't crash; they should
+# migrate to _tunable_keys(strategy_mode).
+_TUNABLE = _TUNABLE_WHEEL
+
+
+def _current_settings(project_id: str,
+                      tunable_keys: list[str]) -> dict[str, Any]:
+    return {k: ProjectSettings.get(project_id, k) for k in tunable_keys}
 
 
 def build_recommendations(project_id: str) -> dict[str, Any]:
@@ -39,10 +100,18 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
     if project is None:
         return {"error": "project not found"}
 
+    # strategy_mode scopes which keys the Optimizer is allowed to
+    # touch. A user running iron_condor should never see the LLM
+    # propose csp_delta_min changes that won't affect anything — and
+    # vice versa, the wheel-mode user shouldn't see spread_width.
+    strategy_mode = str(ProjectSettings.get(
+        project_id, "strategy_mode", default="wheel") or "wheel").lower()
+    tunable_keys = _tunable_keys(strategy_mode)
+
     metrics = metrics_summary(project_id, period="month")
     by_delta = attribution_by_dimension(project_id, dimension="delta")
     by_dte = attribution_by_dimension(project_id, dimension="dte")
-    settings = _current_settings(project_id)
+    settings = _current_settings(project_id, tunable_keys)
 
     from agents.llm_factory import build_llm
     from langchain_core.messages import HumanMessage, SystemMessage
@@ -54,17 +123,42 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
         return {"error": "no LLM configured"}
 
     system = SystemMessage(content=(
-        "You are an options-wheel parameter tuner. Look at the user's last "
-        "30 days of P&L attribution and current settings. Suggest ONE or TWO "
-        "specific parameter changes that should improve risk-adjusted return.\n"
-        "\nIMPORTANT: respect the user's stated trading_plan in the payload. "
-        "If trading_plan='conservative', do NOT suggest higher deltas, "
-        "shorter DTE, lower IV-rank floors, or loosened risk caps — pick "
-        "changes that reduce variance even at the cost of premium. If "
-        "trading_plan='aggressive', it's OK to push the other direction. "
-        "If trading_plan='balanced', pick the change with the best "
-        "Sharpe/sortino tradeoff. Never propose changing trading_plan, "
+        "You are an options-strategy parameter tuner. The project's "
+        "strategy_mode tells you which strategy is running — wheel (CSPs + "
+        "CCs), one of six multi-leg spreads (bull_put_spread, "
+        "bear_call_spread, bull_call_spread, bear_put_spread, iron_condor, "
+        "calendar_spread), or intraday_momentum (0DTE/1DTE long calls or "
+        "puts driven by RSI/MACD/VWAP signals). Look at the last 30 days of "
+        "P&L attribution + current settings, then suggest ONE or TWO "
+        "specific parameter changes that should improve risk-adjusted "
+        "return for that strategy.\n"
+        "\nIMPORTANT: respect the user's stated trading_plan in the "
+        "payload. If trading_plan='conservative', do NOT suggest higher "
+        "deltas, shorter DTE, narrower spread widths, lower IV-rank "
+        "floors, or loosened risk caps — pick changes that reduce "
+        "variance even at the cost of premium. If trading_plan="
+        "'aggressive', it's OK to push the other direction. If "
+        "trading_plan='balanced', pick the change with the best "
+        "Sharpe/Sortino tradeoff. Never propose changing trading_plan, "
         "strategy_mode, or dry_run — those encode user intent.\n"
+        "\nStrategy-specific guidance:\n"
+        "- WHEEL: tune csp_delta_*, csp_min/max_dte, cc_delta_*, "
+        "max_collateral_pct, scanner_min_pct_change, close_at_profit_pct, "
+        "min_iv_rank.\n"
+        "- VERTICAL SPREADS (bull_put/bear_call/bull_call/bear_put): "
+        "spread_target_delta sets the SHORT-leg delta; spread_width is "
+        "the dollar distance between legs (wider = more credit but "
+        "higher max-loss); spread_min_dte/spread_max_dte set the DTE "
+        "window.\n"
+        "- IRON CONDOR: same spread_* knobs apply (spread_width becomes "
+        "the wing width on both put + call sides). Lower "
+        "spread_target_delta widens the profit zone but reduces credit.\n"
+        "- CALENDAR SPREAD: tune calendar_short_dte (near-month leg) "
+        "and calendar_long_dte (back-month leg). Wider gap = more "
+        "theta differential but more vega exposure.\n"
+        "- INTRADAY MOMENTUM: the single tunable is "
+        "intraday_max_trades_per_cycle. Raise it cautiously — each new "
+        "trade burns a PDT slot for sub-$25k accounts.\n"
         "\nRules:\n"
         "- Return ONLY raw JSON. No markdown fences, no commentary before "
         "or after.\n"
@@ -73,13 +167,17 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
         "- KEEP RATIONALE UNDER 500 CHARACTERS. Brevity matters — a long "
         "rationale will be truncated and the suggestion will fail to "
         "deliver. State the cause and the expected effect in 2-3 sentences.\n"
+        "- ONLY propose changes to keys listed in tunable_keys for this "
+        "project. Suggesting a key not in the list will be rejected.\n"
         "- Respect parameter scales (see param_scales in payload). "
-        "min_iv_rank is a FRACTION 0..1 (e.g. 0.30 not 30). Delta bounds are "
-        "0..1. Percentages like max_collateral_pct are 0..1.\n"
+        "min_iv_rank is a FRACTION 0..1 (e.g. 0.30 not 30). Delta bounds "
+        "are 0..1. Percentages like max_collateral_pct are 0..1. "
+        "spread_width is in DOLLARS (e.g. 5.0 = $5 spread).\n"
         "- If the data is too sparse for a confident recommendation, return "
         "changes = {} but still return valid JSON with title + rationale."
     ))
     param_scales = {
+        # Wheel
         "csp_delta_min": "0..1 (e.g. 0.15)",
         "csp_delta_max": "0..1 (e.g. 0.30)",
         "cc_delta_min": "0..1",
@@ -93,6 +191,20 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
         "take_profit_enabled": "bool",
         "close_at_profit_pct": "0..1 (e.g. 0.50 = 50% of max profit)",
         "min_iv_rank": "0..1 (e.g. 0.30 means 30th percentile)",
+        # Multi-leg spreads
+        "spread_target_delta": "0..1 — delta of the SHORT leg "
+                               "(0.20-0.35 typical for credit spreads, "
+                               "0.40-0.55 for debit)",
+        "spread_width":        "USD between legs / wing width "
+                               "(1.0-20.0 typical)",
+        "spread_min_dte":      "int days, 7..30 typical",
+        "spread_max_dte":      "int days, 30..60 typical",
+        # Calendar spread
+        "calendar_short_dte":  "int days for near leg, 7..21 typical",
+        "calendar_long_dte":   "int days for back leg, 30..90 typical",
+        # Intraday
+        "intraday_max_trades_per_cycle":
+            "int, 1..10 — opens per cycle for 0DTE/1DTE longs",
     }
     # The user picks a trading_plan ('conservative' / 'balanced' /
     # 'aggressive') as their stated risk identity for this project.
@@ -103,12 +215,13 @@ def build_recommendations(project_id: str) -> dict[str, Any]:
     trading_plan = str(ProjectSettings.get(
         project_id, "trading_plan", default="balanced") or "balanced")
     payload = {
+        "strategy_mode": strategy_mode,
         "metrics_30d": metrics,
         "attribution_by_delta": by_delta,
         "attribution_by_dte": by_dte,
         "current_settings": settings,
         "trading_plan": trading_plan,
-        "tunable_keys": _TUNABLE,
+        "tunable_keys": tunable_keys,
         "param_scales": param_scales,
     }
     user = HumanMessage(content=json.dumps(payload, default=str)[:8000])
