@@ -1087,6 +1087,62 @@ async def dashboard(request: Request):
     })
 
 
+@app.get("/api/projects/{project_id}/today_pnl")
+async def api_today_pnl(request: Request, project_id: str):
+    """Today's gain/loss for a single project. Used by the projects
+    dashboard to populate the Today P/L column asynchronously (so the
+    page itself doesn't block on N broker calls).
+
+    Sources, in priority:
+      1. Alpaca: ``equity - last_equity`` directly from the broker
+         (includes both realized + unrealized; updates real-time).
+      2. ETrade or fallback: realized P&L from closed_contracts since
+         UTC midnight (no unrealized component for now).
+    """
+    project = _scoped_project(project_id, request)
+    try:
+        from execution import BrokerReauthRequired, get_broker
+        client = get_broker(project)
+        account = client.get_account()
+        equity = float(account.get("equity") or 0)
+        last_equity = float(account.get("last_equity") or 0)
+        if equity > 0 and last_equity > 0:
+            change = equity - last_equity
+            pct = (change / last_equity * 100) if last_equity else None
+            return {
+                "project_id": project_id,
+                "today_change": round(change, 2),
+                "today_pct": round(pct, 2) if pct is not None else None,
+                "equity": round(equity, 2),
+                "source": "broker_equity_delta",
+            }
+    except BrokerReauthRequired:
+        return {"project_id": project_id, "today_change": None,
+                "source": "needs_reauth"}
+    except Exception as e:
+        logger.warning("today_pnl broker fetch failed for %s: %s",
+                       project_id, e)
+    # Fallback — realized P&L since UTC midnight from closed_contracts.
+    try:
+        from datetime import datetime, timezone
+        from db.analytics_repos import ClosedContractsRepo
+        midnight = datetime.now(tz=timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        rows = ClosedContractsRepo.list(
+            project_id, since=midnight, limit=200)
+        realized = sum(float(r.get("realized_pnl") or 0) for r in rows)
+        return {
+            "project_id": project_id,
+            "today_change": round(realized, 2),
+            "today_pct": None,
+            "equity": None,
+            "source": "realized_only_fallback",
+        }
+    except Exception as e:
+        return {"project_id": project_id, "today_change": None,
+                "error": str(e)[:200]}
+
+
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     rows = AppSettings.list_all()

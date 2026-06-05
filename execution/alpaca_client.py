@@ -82,6 +82,9 @@ class AlpacaClient(BrokerClient):
             "equity": float(a.equity),
             "portfolio_value": float(a.portfolio_value),
             "options_buying_power": float(getattr(a, "options_buying_power", 0) or 0),
+            # last_equity = equity at the prior close. Used by the
+            # projects-dashboard's "Today's Gain/Loss" column.
+            "last_equity": float(getattr(a, "last_equity", 0) or 0),
         }
 
     def get_account_raw(self) -> dict[str, Any]:

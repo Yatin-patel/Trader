@@ -9,24 +9,26 @@
     <button id="add-project-btn" class="btn primary">+ New Project</button>
   </header>
 
-  <table class="data">
+  <table class="data" id="projects-table">
     <thead>
       <tr>
         <th>Project ID</th>
         <th>Name</th>
         <th>Endpoint</th>
         <th>Allocation</th>
+        <th class="right" title="Today's gain/loss = current equity − prior close equity. Updated by the broker in real-time on Alpaca; closed-trades realized P/L fallback on other brokers.">Today P/L</th>
         <th>Active</th>
         <th></th>
       </tr>
     </thead>
     <tbody>
       {% for p in projects %}
-      <tr>
+      <tr data-project-id="{{ p.project_id }}">
         <td><a href="/projects/{{ p.project_id }}">{{ p.project_id }}</a></td>
         <td>{{ p.project_name }}</td>
         <td><code>{{ p.alpaca_base_url }}</code></td>
         <td>${{ "%.2f"|format(p.max_equity_allocation) }}</td>
+        <td class="right today-pnl muted" data-loading>—</td>
         <td>{{ "Yes" if p.is_active else "No" }}</td>
         <td>
           <a class="btn small ghost" href="/projects/{{ p.project_id }}/performance">P&amp;L</a>
@@ -134,4 +136,61 @@
     </div>
   </form>
 </dialog>
+
+<script>
+// Today's Gain/Loss populator. Fetches /api/projects/{pid}/today_pnl
+// for each row asynchronously so the dashboard doesn't block on N
+// broker calls during page render. Updates the corresponding cell
+// when each request returns.
+(function () {
+  const fmt = (n) => {
+    if (n === null || n === undefined || Number.isNaN(n)) return "—";
+    const sign = n > 0 ? "+" : "";
+    return sign + "$" + Math.abs(n).toLocaleString("en-US", {
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    }) * (n < 0 ? -1 : 1);  // signed dollar string
+  };
+  const fmtSigned = (n) => {
+    if (n === null || n === undefined || Number.isNaN(n)) return "—";
+    const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+    return sign + "$" + Math.abs(n).toLocaleString("en-US", {
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    });
+  };
+  const rows = document.querySelectorAll(
+    "#projects-table tbody tr[data-project-id]");
+  rows.forEach((row) => {
+    const pid = row.dataset.projectId;
+    const cell = row.querySelector(".today-pnl");
+    if (!cell) return;
+    fetch(`/api/projects/${encodeURIComponent(pid)}/today_pnl`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.today_change === null || d.today_change === undefined) {
+          cell.textContent = d.source === "needs_reauth"
+            ? "reauth"
+            : "—";
+          cell.className = "right today-pnl muted";
+          return;
+        }
+        const change = parseFloat(d.today_change);
+        const pct = (d.today_pct !== null && d.today_pct !== undefined)
+          ? ` (${change >= 0 ? "+" : ""}${parseFloat(d.today_pct).toFixed(2)}%)`
+          : "";
+        cell.textContent = fmtSigned(change) + pct;
+        cell.className = "right today-pnl " + (
+          change > 0 ? "pl-pos" : change < 0 ? "pl-neg" : "muted");
+      })
+      .catch(() => {
+        cell.textContent = "err";
+        cell.className = "right today-pnl muted";
+      });
+  });
+})();
+</script>
+<style>
+  .today-pnl { font-variant-numeric: tabular-nums; font-weight: 500; }
+  .pl-pos { color: #16a34a; }
+  .pl-neg { color: #dc2626; }
+</style>
 {% endblock %}
