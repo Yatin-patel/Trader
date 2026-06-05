@@ -231,37 +231,62 @@ class IronCondorStrategy:
             Execution result
         """
         legs = setup["legs"]
-        orders = []
+        orders: list[Any] = []
+        atomic = None
 
         try:
-            # Submit all four legs
-            # Long put
-            o1 = self.client.submit_limit_option(
-                legs["long_put"]["symbol"], quantity, "buy",
-                legs["long_put"]["mid"], time_in_force="day"
-            )
-            orders.append({"leg": "long_put", "order": o1})
-
-            # Short put
-            o2 = self.client.submit_limit_option(
-                legs["short_put"]["symbol"], quantity, "sell",
-                legs["short_put"]["mid"], time_in_force="day"
-            )
-            orders.append({"leg": "short_put", "order": o2})
-
-            # Short call
-            o3 = self.client.submit_limit_option(
-                legs["short_call"]["symbol"], quantity, "sell",
-                legs["short_call"]["mid"], time_in_force="day"
-            )
-            orders.append({"leg": "short_call", "order": o3})
-
-            # Long call
-            o4 = self.client.submit_limit_option(
-                legs["long_call"]["symbol"], quantity, "buy",
-                legs["long_call"]["mid"], time_in_force="day"
-            )
-            orders.append({"leg": "long_call", "order": o4})
+            # Prefer atomic 4-leg submission when the broker supports it
+            # (Alpaca v2 mleg, ETrade IRON_CONDOR). Falls back to
+            # individual legs otherwise — same as before.
+            if getattr(self.client, "supports_multi_leg", lambda: False)():
+                # net_credit on the setup is per-contract DOLLARS; mleg
+                # net_limit_price is per-share, negative for credits.
+                net_credit_per_share = (
+                    float(setup["net_credit"]) / 100.0
+                )
+                mleg_legs = [
+                    {"symbol": legs["long_put"]["symbol"], "side": "buy",
+                     "ratio_qty": 1,
+                     "position_intent": "buying_to_open"},
+                    {"symbol": legs["short_put"]["symbol"], "side": "sell",
+                     "ratio_qty": 1,
+                     "position_intent": "selling_to_open"},
+                    {"symbol": legs["short_call"]["symbol"], "side": "sell",
+                     "ratio_qty": 1,
+                     "position_intent": "selling_to_open"},
+                    {"symbol": legs["long_call"]["symbol"], "side": "buy",
+                     "ratio_qty": 1,
+                     "position_intent": "buying_to_open"},
+                ]
+                atomic = self.client.submit_multi_leg_option(
+                    legs=mleg_legs, qty=quantity,
+                    net_limit_price=-net_credit_per_share,
+                    time_in_force="day",
+                )
+                orders.append({"leg": "iron_condor_atomic",
+                               "order": atomic})
+            else:
+                # Legacy leg-by-leg submission.
+                o1 = self.client.submit_limit_option(
+                    legs["long_put"]["symbol"], quantity, "buy",
+                    legs["long_put"]["mid"], time_in_force="day"
+                )
+                orders.append({"leg": "long_put", "order": o1})
+                o2 = self.client.submit_limit_option(
+                    legs["short_put"]["symbol"], quantity, "sell",
+                    legs["short_put"]["mid"], time_in_force="day"
+                )
+                orders.append({"leg": "short_put", "order": o2})
+                o3 = self.client.submit_limit_option(
+                    legs["short_call"]["symbol"], quantity, "sell",
+                    legs["short_call"]["mid"], time_in_force="day"
+                )
+                orders.append({"leg": "short_call", "order": o3})
+                o4 = self.client.submit_limit_option(
+                    legs["long_call"]["symbol"], quantity, "buy",
+                    legs["long_call"]["mid"], time_in_force="day"
+                )
+                orders.append({"leg": "long_call", "order": o4})
 
             # Record multi-leg order
             with session_scope() as s:
@@ -296,6 +321,7 @@ class IronCondorStrategy:
                 s.commit()
 
             EventsRepo.log(self.project_id, "IronCondor", "EXECUTE", {
+                "atomic": atomic is not None,
                 "order_id": order_id,
                 "ticker": setup["ticker"],
                 "net_credit": setup["net_credit"],

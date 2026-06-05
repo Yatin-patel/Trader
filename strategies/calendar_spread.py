@@ -230,18 +230,41 @@ class CalendarSpreadStrategy:
         Returns:
             Execution result
         """
+        atomic = None
         try:
-            # Sell short-term option
-            o1 = self.client.submit_limit_option(
-                setup["short_leg"]["symbol"], quantity, "sell",
-                setup["short_leg"]["mid"], time_in_force="day"
-            )
-
-            # Buy long-term option
-            o2 = self.client.submit_limit_option(
-                setup["long_leg"]["symbol"], quantity, "buy",
-                setup["long_leg"]["mid"], time_in_force="day"
-            )
+            if getattr(self.client, "supports_multi_leg",
+                       lambda: False)():
+                # Calendars are net-debit (long back-month costs more
+                # than short near-month). net_debit on the setup is
+                # per-contract DOLLARS; mleg wants per-share.
+                net_debit_per_share = (
+                    float(setup["net_debit"]) / 100.0
+                )
+                mleg_legs = [
+                    {"symbol": setup["short_leg"]["symbol"],
+                     "side": "sell", "ratio_qty": 1,
+                     "position_intent": "selling_to_open"},
+                    {"symbol": setup["long_leg"]["symbol"],
+                     "side": "buy",  "ratio_qty": 1,
+                     "position_intent": "buying_to_open"},
+                ]
+                atomic = self.client.submit_multi_leg_option(
+                    legs=mleg_legs, qty=quantity,
+                    net_limit_price=net_debit_per_share,
+                    time_in_force="day",
+                )
+                o1 = atomic
+                o2 = atomic
+            else:
+                # Legacy serial submission.
+                o1 = self.client.submit_limit_option(
+                    setup["short_leg"]["symbol"], quantity, "sell",
+                    setup["short_leg"]["mid"], time_in_force="day"
+                )
+                o2 = self.client.submit_limit_option(
+                    setup["long_leg"]["symbol"], quantity, "buy",
+                    setup["long_leg"]["mid"], time_in_force="day"
+                )
 
             # Record in database
             with session_scope() as s:
@@ -271,6 +294,7 @@ class CalendarSpreadStrategy:
                 s.commit()
 
             EventsRepo.log(self.project_id, "CalendarSpread", "EXECUTE", {
+                "atomic": atomic is not None,
                 "order_id": order_id,
                 "ticker": setup["ticker"],
                 "strike": setup["strike"],
@@ -322,7 +346,7 @@ def roll_short_leg(
     if not project:
         return {"error": "Project not found"}
 
-    client = AlpacaClient(project)
+    client = get_broker(project)
 
     # Determine option type and strike from old short
     # Symbol format: AAPL240119C00150000

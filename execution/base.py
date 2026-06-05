@@ -87,6 +87,48 @@ class BrokerClient(abc.ABC):
                             time_in_force: str = "day") -> dict[str, Any]:
         """Submit a limit option order. Side: 'buy' | 'sell'."""
 
+    # ---------------- Multi-leg (defined-risk spreads, condors) ----------
+    #
+    # Optional. Strategies should prefer this when supports_multi_leg() is
+    # True so legs go in as an atomic unit (no partial-fill risk). The
+    # default fall-through raises NotImplementedError so callers know to
+    # use the leg-by-leg path.
+
+    def supports_multi_leg(self) -> bool:
+        """True if the adapter implements submit_multi_leg_option."""
+        return False
+
+    def submit_multi_leg_option(
+        self,
+        legs: list[dict[str, Any]],
+        qty: int,
+        net_limit_price: float,
+        time_in_force: str = "day",
+    ) -> dict[str, Any]:
+        """Atomic submit for a defined-risk multi-leg options trade.
+
+        Each leg dict carries:
+          symbol            OCC option symbol
+          side              'buy' | 'sell'
+          ratio_qty         per-leg ratio (1 for vertical/condor/calendar)
+          position_intent   'buying_to_open' | 'selling_to_open'
+                            | 'buying_to_close' | 'selling_to_close'
+
+        net_limit_price is the trade-wide limit per ONE multi-leg unit.
+        Convention: POSITIVE = debit you'll pay, NEGATIVE = credit you
+        require (matches the OCC + Alpaca convention so a bull put
+        spread quotes with a negative limit).
+
+        Return shape mirrors submit_limit_option — an order dict that
+        carries at minimum {id, symbol, side, status} plus a
+        ``legs`` array describing each filled leg when the broker
+        echoes them.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement "
+            "submit_multi_leg_option; use leg-by-leg submission."
+        )
+
     # ---------------- Market schedule ------------------------------------
 
     @abc.abstractmethod

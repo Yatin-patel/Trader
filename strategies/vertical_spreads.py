@@ -8,14 +8,55 @@ Bear Put Spread: Buy higher put, sell lower put (bearish, debit)
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Any
+
+from sqlalchemy import text
 
 from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
 from execution import get_broker
 
 logger = logging.getLogger(__name__)
+
+
+def _try_atomic_two_leg(
+    client: Any,
+    short_leg: dict,
+    long_leg: dict,
+    quantity: int,
+    net_credit_per_contract: float | None,
+    net_debit_per_contract: float | None,
+) -> dict[str, Any] | None:
+    """Submit a credit OR debit vertical as a single mleg order if the
+    broker supports it. Returns the broker response on success, None
+    when the broker doesn't support multi-leg (caller falls back to
+    leg-by-leg submission).
+
+    Convention: ``net_limit_price`` is positive for debit (you pay)
+    and negative for credit (you receive). This matches Alpaca's mleg
+    expectation; ETrade's adapter normalizes internally.
+    """
+    if not getattr(client, "supports_multi_leg", lambda: False)():
+        return None
+    if net_credit_per_contract is not None:
+        # Credit spread: per-contract net credit in DOLLARS; convert to
+        # per-share by /100. Negative because we RECEIVE.
+        net_limit_price = -float(net_credit_per_contract) / 100.0
+    elif net_debit_per_contract is not None:
+        net_limit_price = float(net_debit_per_contract) / 100.0
+    else:
+        return None
+    legs = [
+        {"symbol": short_leg["symbol"], "side": "sell", "ratio_qty": 1,
+         "position_intent": "selling_to_open"},
+        {"symbol": long_leg["symbol"],  "side": "buy",  "ratio_qty": 1,
+         "position_intent": "buying_to_open"},
+    ]
+    return client.submit_multi_leg_option(
+        legs=legs, qty=quantity, net_limit_price=net_limit_price,
+        time_in_force="day",
+    )
 
 
 class VerticalSpreadStrategy:
@@ -197,19 +238,28 @@ class BullPutSpreadStrategy(VerticalSpreadStrategy):
         }
 
     def execute(self, setup: dict, quantity: int = 1) -> dict[str, Any]:
-        """Execute bull put spread."""
+        """Execute bull put spread atomically when the broker supports
+        multi-leg orders (Phase 2+); fall back to leg-by-leg
+        otherwise."""
         try:
-            # Sell short put
-            o1 = self.client.submit_limit_option(
-                setup["short_leg"]["symbol"], quantity, "sell",
-                setup["short_leg"]["mid"], time_in_force="day"
+            atomic = _try_atomic_two_leg(
+                self.client, setup["short_leg"], setup["long_leg"],
+                quantity, net_credit_per_contract=setup["net_credit"],
+                net_debit_per_contract=None,
             )
-
-            # Buy long put
-            o2 = self.client.submit_limit_option(
-                setup["long_leg"]["symbol"], quantity, "buy",
-                setup["long_leg"]["mid"], time_in_force="day"
-            )
+            if atomic is not None:
+                orders = [atomic]
+            else:
+                # Legacy leg-by-leg path (broker doesn't expose mleg).
+                o1 = self.client.submit_limit_option(
+                    setup["short_leg"]["symbol"], quantity, "sell",
+                    setup["short_leg"]["mid"], time_in_force="day"
+                )
+                o2 = self.client.submit_limit_option(
+                    setup["long_leg"]["symbol"], quantity, "buy",
+                    setup["long_leg"]["mid"], time_in_force="day"
+                )
+                orders = [o1, o2]
 
             order_id = self._record_spread(
                 setup["ticker"], self.strategy_type,
@@ -222,9 +272,10 @@ class BullPutSpreadStrategy(VerticalSpreadStrategy):
                 "order_id": order_id,
                 "ticker": setup["ticker"],
                 "net_credit": setup["net_credit"],
+                "atomic": atomic is not None,
             })
 
-            return {"success": True, "order_id": order_id, "orders": [o1, o2]}
+            return {"success": True, "order_id": order_id, "orders": orders}
 
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -326,17 +377,25 @@ class BearCallSpreadStrategy(VerticalSpreadStrategy):
         }
 
     def execute(self, setup: dict, quantity: int = 1) -> dict[str, Any]:
-        """Execute bear call spread."""
+        """Execute bear call spread (credit, atomic-preferred)."""
         try:
-            o1 = self.client.submit_limit_option(
-                setup["short_leg"]["symbol"], quantity, "sell",
-                setup["short_leg"]["mid"], time_in_force="day"
+            atomic = _try_atomic_two_leg(
+                self.client, setup["short_leg"], setup["long_leg"],
+                quantity, net_credit_per_contract=setup["net_credit"],
+                net_debit_per_contract=None,
             )
-
-            o2 = self.client.submit_limit_option(
-                setup["long_leg"]["symbol"], quantity, "buy",
-                setup["long_leg"]["mid"], time_in_force="day"
-            )
+            if atomic is not None:
+                orders = [atomic]
+            else:
+                o1 = self.client.submit_limit_option(
+                    setup["short_leg"]["symbol"], quantity, "sell",
+                    setup["short_leg"]["mid"], time_in_force="day"
+                )
+                o2 = self.client.submit_limit_option(
+                    setup["long_leg"]["symbol"], quantity, "buy",
+                    setup["long_leg"]["mid"], time_in_force="day"
+                )
+                orders = [o1, o2]
 
             order_id = self._record_spread(
                 setup["ticker"], self.strategy_type,
@@ -349,9 +408,10 @@ class BearCallSpreadStrategy(VerticalSpreadStrategy):
                 "order_id": order_id,
                 "ticker": setup["ticker"],
                 "net_credit": setup["net_credit"],
+                "atomic": atomic is not None,
             })
 
-            return {"success": True, "order_id": order_id, "orders": [o1, o2]}
+            return {"success": True, "order_id": order_id, "orders": orders}
 
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -453,17 +513,25 @@ class BullCallSpreadStrategy(VerticalSpreadStrategy):
         }
 
     def execute(self, setup: dict, quantity: int = 1) -> dict[str, Any]:
-        """Execute bull call spread."""
+        """Execute bull call spread (debit, atomic-preferred)."""
         try:
-            o1 = self.client.submit_limit_option(
-                setup["long_leg"]["symbol"], quantity, "buy",
-                setup["long_leg"]["mid"], time_in_force="day"
+            atomic = _try_atomic_two_leg(
+                self.client, setup["short_leg"], setup["long_leg"],
+                quantity, net_credit_per_contract=None,
+                net_debit_per_contract=setup["net_debit"],
             )
-
-            o2 = self.client.submit_limit_option(
-                setup["short_leg"]["symbol"], quantity, "sell",
-                setup["short_leg"]["mid"], time_in_force="day"
-            )
+            if atomic is not None:
+                orders = [atomic]
+            else:
+                o1 = self.client.submit_limit_option(
+                    setup["long_leg"]["symbol"], quantity, "buy",
+                    setup["long_leg"]["mid"], time_in_force="day"
+                )
+                o2 = self.client.submit_limit_option(
+                    setup["short_leg"]["symbol"], quantity, "sell",
+                    setup["short_leg"]["mid"], time_in_force="day"
+                )
+                orders = [o1, o2]
 
             # Record as negative credit (debit)
             order_id = self._record_spread(
@@ -472,8 +540,14 @@ class BullCallSpreadStrategy(VerticalSpreadStrategy):
                 -setup["net_debit"], setup["max_loss"],
                 quantity, setup.get("expiration")
             )
+            EventsRepo.log(self.project_id, "BullCallSpread", "EXECUTE", {
+                "order_id": order_id,
+                "ticker": setup["ticker"],
+                "net_debit": setup["net_debit"],
+                "atomic": atomic is not None,
+            })
 
-            return {"success": True, "order_id": order_id, "orders": [o1, o2]}
+            return {"success": True, "order_id": order_id, "orders": orders}
 
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -575,17 +649,25 @@ class BearPutSpreadStrategy(VerticalSpreadStrategy):
         }
 
     def execute(self, setup: dict, quantity: int = 1) -> dict[str, Any]:
-        """Execute bear put spread."""
+        """Execute bear put spread (debit, atomic-preferred)."""
         try:
-            o1 = self.client.submit_limit_option(
-                setup["long_leg"]["symbol"], quantity, "buy",
-                setup["long_leg"]["mid"], time_in_force="day"
+            atomic = _try_atomic_two_leg(
+                self.client, setup["short_leg"], setup["long_leg"],
+                quantity, net_credit_per_contract=None,
+                net_debit_per_contract=setup["net_debit"],
             )
-
-            o2 = self.client.submit_limit_option(
-                setup["short_leg"]["symbol"], quantity, "sell",
-                setup["short_leg"]["mid"], time_in_force="day"
-            )
+            if atomic is not None:
+                orders = [atomic]
+            else:
+                o1 = self.client.submit_limit_option(
+                    setup["long_leg"]["symbol"], quantity, "buy",
+                    setup["long_leg"]["mid"], time_in_force="day"
+                )
+                o2 = self.client.submit_limit_option(
+                    setup["short_leg"]["symbol"], quantity, "sell",
+                    setup["short_leg"]["mid"], time_in_force="day"
+                )
+                orders = [o1, o2]
 
             order_id = self._record_spread(
                 setup["ticker"], self.strategy_type,
@@ -593,8 +675,14 @@ class BearPutSpreadStrategy(VerticalSpreadStrategy):
                 -setup["net_debit"], setup["max_loss"],
                 quantity, setup.get("expiration")
             )
+            EventsRepo.log(self.project_id, "BearPutSpread", "EXECUTE", {
+                "order_id": order_id,
+                "ticker": setup["ticker"],
+                "net_debit": setup["net_debit"],
+                "atomic": atomic is not None,
+            })
 
-            return {"success": True, "order_id": order_id, "orders": [o1, o2]}
+            return {"success": True, "order_id": order_id, "orders": orders}
 
         except Exception as e:
             return {"success": False, "error": str(e)}

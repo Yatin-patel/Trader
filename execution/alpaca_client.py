@@ -239,6 +239,80 @@ class AlpacaClient(BrokerClient):
         order = self.trading.submit_order(req)
         return self._order_dict(order)
 
+    # ---------------- Multi-leg (atomic, no partial-fill risk) ----------
+
+    def supports_multi_leg(self) -> bool:
+        # Alpaca's v2 /orders supports order_class=mleg for up to 4
+        # option legs as of 2024.
+        return True
+
+    def submit_multi_leg_option(
+        self,
+        legs: list[dict[str, Any]],
+        qty: int,
+        net_limit_price: float,
+        time_in_force: str = "day",
+    ) -> dict[str, Any]:
+        """Submit an atomic multi-leg options order via Alpaca's
+        ``order_class=mleg`` REST endpoint.
+
+        We POST directly rather than going through alpaca-py so the
+        payload doesn't depend on a particular SDK minor version
+        shipping OptionLegRequest (different SDK builds spell the
+        field differently). The endpoint is the same `/v2/orders`
+        path used by single-leg orders; we authenticate with the
+        same APCA-API-KEY-ID / APCA-API-SECRET-KEY headers the SDK
+        attaches.
+        """
+        import json as _json
+
+        import requests as _requests
+
+        base = (self.project.alpaca_base_url
+                or "https://paper-api.alpaca.markets").rstrip("/")
+        url = f"{base}/v2/orders"
+        headers = {
+            "APCA-API-KEY-ID":     self.project.alpaca_api_key,
+            "APCA-API-SECRET-KEY": self.project.alpaca_secret_key,
+            "Content-Type":        "application/json",
+            "Accept":              "application/json",
+        }
+        payload_legs = []
+        for leg in legs:
+            side = str(leg.get("side") or "").lower()
+            intent = str(leg.get("position_intent") or "").lower()
+            if not intent:
+                # Default to opening intents — strategies submit closes
+                # via single-leg flow today.
+                intent = ("buying_to_open" if side == "buy"
+                          else "selling_to_open")
+            payload_legs.append({
+                "symbol":          leg["symbol"],
+                "ratio_qty":       str(int(leg.get("ratio_qty") or 1)),
+                "side":            "buy" if side == "buy" else "sell",
+                "position_intent": intent,
+            })
+        body = {
+            "order_class":    "mleg",
+            "qty":             str(int(qty)),
+            "type":            "limit",
+            "time_in_force":   time_in_force.lower(),
+            "limit_price":     str(round(float(net_limit_price), 2)),
+            "legs":            payload_legs,
+        }
+        r = _requests.post(url, headers=headers, data=_json.dumps(body),
+                           timeout=20)
+        if r.status_code >= 400:
+            # Surface Alpaca's machine-readable error so the executor
+            # can classify "4xx with code:4*" as a routine broker
+            # rejection (insufficient BP, halted symbol, etc.) just
+            # like single-leg orders do.
+            raise RuntimeError(f"alpaca mleg HTTP {r.status_code}: {r.text[:500]}")
+        try:
+            return r.json()
+        except Exception:
+            return {"status": "submitted", "body": r.text[:500]}
+
     def liquidate_position(self, symbol: str) -> dict[str, Any]:
         try:
             order = self.trading.close_position(symbol)
