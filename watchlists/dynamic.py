@@ -214,6 +214,46 @@ def get_proposed_watchlist(project_id: str) -> dict[str, Any]:
     momentum_budget = max(0, max_size - len(core))
     momentum = [s for s, _, _, _ in scored[:momentum_budget]]
 
+    # ---- News-aware augmentation (free RSS feeds) -----------------------
+    # Bias the momentum scorer toward tickers with active news flow in
+    # the last ~30 min. A ticker that's both moving + getting written
+    # about is more likely to keep moving than one moving on no news.
+    # Pull from MarketWatch / CNBC / Yahoo headlines / Seeking Alpha /
+    # WSB — all free, no rate limits. Falls through silently when
+    # the news layer is unavailable so the watchlist still ships.
+    news_enabled = bool(ProjectSettings.get(
+        project_id, "news_aware_watchlist", default=True))
+    news_added: list[str] = []
+    if news_enabled:
+        try:
+            from news import get_news_mentions
+            pool_set = set(pool)
+            # Re-score: existing momentum-score + news bonus.
+            for idx, (sym, score, last_price, pct) in enumerate(scored):
+                mentions = get_news_mentions(sym, pool_set)
+                if mentions and mentions.count > 0:
+                    # Each mention adds 5% to the score; cap at 50%
+                    # so a runaway-mention name doesn't dominate.
+                    news_bonus = min(0.5, 0.05 * mentions.count)
+                    scored[idx] = (
+                        sym,
+                        score * (1.0 + news_bonus),
+                        last_price,
+                        pct,
+                    )
+            # Re-sort after the news bonus + collect which got boosted.
+            scored.sort(key=lambda t: -t[1])
+            boosted = []
+            for sym, _, _, _ in scored[:momentum_budget]:
+                mentions = get_news_mentions(sym, pool_set)
+                if mentions and mentions.count > 0:
+                    boosted.append(sym)
+            news_added = boosted
+            # Refresh momentum based on the news-adjusted ordering.
+            momentum = [s for s, _, _, _ in scored[:momentum_budget]]
+        except Exception as e:
+            logger.warning("news-aware scoring failed: %s", e)
+
     # ---- IV-rich layer (optional augmentation) --------------------------
     iv_rich: list[str] = []
     try:
@@ -286,6 +326,7 @@ def get_proposed_watchlist(project_id: str) -> dict[str, Any]:
         "core":                core,
         "momentum":            momentum,
         "iv_rich":             iv_rich,
+        "news_boosted":        news_added,
         "final":               combined,
         "dropped_for_bp":      dropped_bp,
         "dropped_for_earnings": dropped_earnings,

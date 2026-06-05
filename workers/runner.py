@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timezone
 
 from db.repositories import ProjectsRepo
 from db.settings_store import AppSettings, ProjectSettings
@@ -277,6 +278,35 @@ class MultiTenantRunner:
             _watchlist_refresh_tick, "cron",
             hour=13, minute=35, timezone=timezone.utc,
             id="dynamic_watchlist", replace_existing=True)
+
+        # ---- News RSS aggregator refresh (every 30 min) -----------
+        # Pulls free-tier RSS feeds (MarketWatch, CNBC, Yahoo,
+        # Seeking Alpha, Reddit WSB) and caches per-ticker mention
+        # counts so the dynamic watchlist's news-aware scoring layer
+        # is O(1) per lookup. The fetcher tolerates failure per feed
+        # so a single dead URL doesn't break aggregation.
+        async def _news_refresh_tick():
+            try:
+                from news import refresh_news_cache
+                # Use the dynamic watchlist's curated pool as the
+                # valid-ticker filter so bare-word matches don't
+                # surface false positives (GDP, USA, etc.).
+                from watchlists.dynamic import _LIQUID_OPTIONABLE_POOL
+                valid = {s.strip().upper()
+                         for s in _LIQUID_OPTIONABLE_POOL.split(",")
+                         if s.strip()}
+                res = await asyncio.to_thread(
+                    refresh_news_cache, valid, force=True)
+                if res.get("status") == "refreshed":
+                    logger.info(
+                        "news cache refreshed: %d tickers found, "
+                        "per-source counts %s",
+                        res.get("tickers_found"),
+                        res.get("per_source"))
+            except Exception as ex:
+                logger.exception("news refresh failed: %s", ex)
+        sched.add_job(_news_refresh_tick, "interval", minutes=30,
+                      id="news_refresh", replace_existing=True)
 
         # ---- Deep position reconciliation (twice daily) -----------
         # The 15-min light pass above only detects PRESENCE mismatches
