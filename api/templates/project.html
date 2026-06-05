@@ -226,6 +226,11 @@
       'dca_only':       'No options. Just runs your DCA schedules to buy stock on a cadence (daily / weekly / monthly). Long-term stock accumulation. Tax-lot accounting tracks holding period for capital-gains.',
       'paused':         'Project does nothing. The runner skips all cycles. Use this for manual review, broker-side maintenance, or pausing without deleting the project.'
     } %}
+    {% set trading_plan_help = {
+      'conservative': 'Smaller positions, longer DTE, narrower delta band. The Optimizer Agent takes tiny steps (≤15% per cycle) and prefers variance-reducing changes even at the cost of premium.',
+      'balanced':     'Default — middle ground. Optimizer can step up to 50% per cycle and picks changes with the best Sharpe / Sortino tradeoff.',
+      'aggressive':   'Higher delta, shorter DTE, looser risk caps. Optimizer can step up to 75% per cycle and pushes for premium / activity. Use with care on small accounts.'
+    } %}
     {% for s in project_settings %}
     <div class="setting-row" data-key="{{ s.key }}" data-type="{{ s.value_type }}">
       <div class="setting-meta">
@@ -248,6 +253,12 @@
           <select data-value data-help-map='{{ strategy_mode_help | tojson }}'>
             {% for opt in ['wheel', 'wheel_plus_dca', 'dca_only', 'paused'] %}
               <option value="{{ opt }}" {% if s.value == opt %}selected{% endif %} title="{{ strategy_mode_help[opt] }}">{{ opt }}</option>
+            {% endfor %}
+          </select>
+        {% elif s.key == 'trading_plan' %}
+          <select data-value data-help-map='{{ trading_plan_help | tojson }}'>
+            {% for opt in ['conservative', 'balanced', 'aggressive'] %}
+              <option value="{{ opt }}" {% if s.value == opt %}selected{% endif %} title="{{ trading_plan_help[opt] }}">{{ opt }}</option>
             {% endfor %}
           </select>
         {% else %}
