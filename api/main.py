@@ -882,6 +882,114 @@ async def etrade_callback(request: Request,
         access_token=access_token,
         access_token_secret=access_secret,
     )
+    # Refetch project with the new tokens, then list accounts so the
+    # user can pick which one this project should trade against.
+    # If only one account exists we silently bind it; on 2+ we render
+    # the picker page.
+    project = ProjectsRepo.get(project_id)
+    from execution.etrade_client import ETradeClient
+    try:
+        client = await asyncio.to_thread(ETradeClient, project)
+        accounts = await asyncio.to_thread(client.list_accounts)
+    except Exception as e:
+        logger.exception("ETrade /accounts/list failed post-OAuth: %s", e)
+        return RedirectResponse(f"/projects/{project_id}", status_code=303)
+    if len(accounts) <= 1:
+        # Single account → auto-bind via the same path ETradeClient
+        # uses when it falls back to /accounts/list. Skip the picker.
+        return RedirectResponse(f"/projects/{project_id}", status_code=303)
+    return templates.TemplateResponse("etrade_account_picker.html", {
+        "request": request,
+        "project": project,
+        "accounts": accounts,
+    })
+
+
+# ---------- ETrade account-key picker (Phase 2 — multi-account support) ---
+
+@app.get("/api/projects/{project_id}/etrade/accounts")
+async def api_etrade_list_accounts(request: Request, project_id: str):
+    """List every ETrade account the OAuth user has access to. Used by
+    the project-page picker + the post-OAuth callback page so the user
+    can choose which account to bind the project to."""
+    project = _scoped_project(project_id, request)
+    if project.broker_type != "etrade":
+        raise HTTPException(400, "Not an ETrade project")
+    if not project.etrade_access_token:
+        raise HTTPException(400,
+            "ETrade is not connected yet — complete OAuth first.")
+    from execution.etrade_client import ETradeClient
+    try:
+        client = ETradeClient(project)
+    except Exception as e:
+        raise HTTPException(502, f"ETrade client error: {e}")
+    accounts = await asyncio.to_thread(client.list_accounts)
+    return {
+        "accounts": accounts,
+        "current_account_id_key": project.etrade_account_id_key or "",
+    }
+
+
+class _ETradeAccountSelectIn(BaseModel):
+    account_id_key: str
+
+
+@app.post("/api/projects/{project_id}/etrade/account")
+async def api_etrade_select_account(request: Request, project_id: str,
+                                    payload: _ETradeAccountSelectIn):
+    """Bind the project to a specific ETrade accountIdKey. The next
+    snapshot tick uses this key for balance / portfolio / orders."""
+    project = _scoped_project(project_id, request)
+    if project.broker_type != "etrade":
+        raise HTTPException(400, "Not an ETrade project")
+    key = (payload.account_id_key or "").strip()
+    if not key:
+        raise HTTPException(400, "account_id_key required")
+    ProjectsRepo.update_etrade_tokens(
+        project_id,
+        access_token=project.etrade_access_token,
+        access_token_secret=project.etrade_access_token_secret,
+        account_id_key=key,
+    )
+    EventsRepo.log(project_id, "Manual", "DB_OVERRIDE", {
+        "action": "etrade_account_selected",
+        "account_id_key": key,
+        "narrative": [
+            f"User selected ETrade accountIdKey={key[:20]}... for "
+            f"this project.",
+        ],
+    })
+    return {"ok": True, "account_id_key": key}
+
+
+@app.post("/etrade/account_callback")
+async def etrade_account_callback(request: Request,
+                                  project_id: str = Form(...),
+                                  account_id_key: str = Form(...)):
+    """Form-POST endpoint the etrade_account_picker.html page submits to.
+    Same behavior as POST /api/projects/{pid}/etrade/account but takes
+    form fields and redirects back to the project page so the user
+    completes the picker in one click."""
+    project = _scoped_project(project_id, request)
+    if project.broker_type != "etrade":
+        raise HTTPException(400, "Not an ETrade project")
+    key = (account_id_key or "").strip()
+    if not key:
+        raise HTTPException(400, "account_id_key required")
+    ProjectsRepo.update_etrade_tokens(
+        project_id,
+        access_token=project.etrade_access_token,
+        access_token_secret=project.etrade_access_token_secret,
+        account_id_key=key,
+    )
+    EventsRepo.log(project_id, "Manual", "DB_OVERRIDE", {
+        "action": "etrade_account_selected",
+        "account_id_key": key,
+        "narrative": [
+            f"User selected ETrade accountIdKey={key[:20]}... after the "
+            f"OAuth flow.",
+        ],
+    })
     return RedirectResponse(f"/projects/{project_id}", status_code=303)
 
 

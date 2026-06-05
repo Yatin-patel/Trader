@@ -9,7 +9,7 @@ import asyncio
 import logging
 
 from db.repositories import ProjectsRepo
-from db.settings_store import AppSettings
+from db.settings_store import AppSettings, ProjectSettings
 
 from .tenant_worker import TenantWorker
 
@@ -21,9 +21,11 @@ class MultiTenantRunner:
         self._workers: dict[str, TenantWorker] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._stop_event = asyncio.Event()
-        # Tracks which non-Alpaca projects we've already warned about so we
-        # don't spam the log every 15s reconcile.
-        self._etrade_warned: dict[str, bool] = {}
+        # Per-project last-run timestamps for ticks that respect a
+        # per-project interval override. monotonic() seconds; 0 = never
+        # run yet (so the first tick after startup fires immediately).
+        self._last_recon_run: dict[str, float] = {}
+        self._last_opt_run: dict[str, float] = {}
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -101,26 +103,48 @@ class MultiTenantRunner:
                       id="daily_backup", replace_existing=True)
 
         # ---- Position reconciliation ---------------------------------
+        # Per-project interval: ProjectSettings.reconcile_interval_min
+        # falls back to AppSettings.reconcile_interval_min (default 15).
+        # The APScheduler tick itself fires every minute and a per-
+        # project guard skips projects that aren't due yet — that way
+        # one project on a 5-min cadence and another on a 30-min cadence
+        # can coexist without running separate scheduler jobs.
+        import time as _runner_time
+
         async def _recon_tick():
             from db.repositories import ProjectsRepo as _PR
             try:
+                global_min = int(AppSettings.get(
+                    "reconcile_interval_min", 15) or 15)
+            except Exception:
+                global_min = 15
+            now = _runner_time.monotonic()
+            try:
                 for proj in _PR.list_active():
+                    try:
+                        per_proj = int(ProjectSettings.get(
+                            proj.project_id,
+                            "reconcile_interval_min", default=0) or 0)
+                    except Exception:
+                        per_proj = 0
+                    interval_min = per_proj if per_proj > 0 else global_min
+                    if interval_min <= 0:
+                        continue
+                    last = self._last_recon_run.get(proj.project_id, 0.0)
+                    if (now - last) < interval_min * 60:
+                        continue
                     try:
                         from ops.reconciliation import run_reconciliation
                         await asyncio.to_thread(run_reconciliation,
                                                 proj.project_id)
+                        self._last_recon_run[proj.project_id] = now
                     except Exception as ex:
                         logger.exception("reconcile failed for %s: %s",
                                          proj.project_id, ex)
             except Exception as ex:
                 logger.exception("recon tick error: %s", ex)
-        try:
-            recon_min = int(AppSettings.get("reconcile_interval_min", 15) or 15)
-        except Exception:
-            recon_min = 15
-        if recon_min > 0:
-            sched.add_job(_recon_tick, "interval", minutes=recon_min,
-                          id="reconciliation", replace_existing=True)
+        sched.add_job(_recon_tick, "interval", minutes=1,
+                      id="reconciliation", replace_existing=True)
 
         # ---- Continuous Optimizer Agent (every N minutes) ---------
         # Runs intelligence/recommendations against each active project
@@ -137,22 +161,19 @@ class MultiTenantRunner:
         # during dead hours wastes API spend and the metrics it reads
         # don't change between, say, 23:00 ET and 03:00 ET anyway.
         # The user explicitly asked for this gate.
+        # Per-project interval: ProjectSettings.optimizer_interval_minutes
+        # falls back to AppSettings.optimizer_interval_minutes (default
+        # 30). Same per-project gating pattern as the recon tick.
         async def _optimizer_tick():
+            from workers.tenant_worker import _in_extended_hours_window
+            from db.repositories import ProjectsRepo as _PR
+            from execution import get_broker
             try:
-                # Reuse the worker's existing ET-window helper. It
-                # checks 04:00 - 20:00 ET AND that the date is in
-                # Alpaca's trading-day calendar (skips weekends +
-                # holidays). Needs a client to read the calendar,
-                # so pick any active project's broker connection.
-                from workers.tenant_worker import _in_extended_hours_window
-                from db.repositories import ProjectsRepo as _PR
-                from execution import get_broker
                 active = _PR.list_active()
                 if not active:
                     return
-                # Pick any active project's broker to get a market
-                # calendar — calendar is global so the broker_type
-                # doesn't matter, just need *a* client.
+                # ET-window check is global — calendar doesn't vary by
+                # project, just need *a* broker for the calendar query.
                 in_window = await asyncio.to_thread(
                     _in_extended_hours_window,
                     get_broker(active[0]),
@@ -163,18 +184,41 @@ class MultiTenantRunner:
                         "window or non-trading day"
                     )
                     return
-                from intelligence.optimizer_agent import run_all_active
-                await asyncio.to_thread(run_all_active)
+                try:
+                    global_min = int(AppSettings.get(
+                        "optimizer_interval_minutes", 30) or 30)
+                except Exception:
+                    global_min = 30
+                now = _runner_time.monotonic()
+                from intelligence.optimizer_agent import run_for_project
+                for proj in active:
+                    try:
+                        per_proj = int(ProjectSettings.get(
+                            proj.project_id,
+                            "optimizer_interval_minutes",
+                            default=0) or 0)
+                    except Exception:
+                        per_proj = 0
+                    interval_min = (per_proj if per_proj > 0
+                                    else global_min)
+                    if interval_min <= 0:
+                        continue
+                    last = self._last_opt_run.get(
+                        proj.project_id, 0.0)
+                    if (now - last) < interval_min * 60:
+                        continue
+                    try:
+                        await asyncio.to_thread(run_for_project,
+                                                proj.project_id)
+                        self._last_opt_run[proj.project_id] = now
+                    except Exception as ex:
+                        logger.exception(
+                            "optimizer failed for %s: %s",
+                            proj.project_id, ex)
             except Exception as ex:
                 logger.exception("optimizer tick error: %s", ex)
-        try:
-            opt_min = int(AppSettings.get(
-                "optimizer_interval_minutes", 30) or 30)
-        except Exception:
-            opt_min = 30
-        if opt_min > 0:
-            sched.add_job(_optimizer_tick, "interval", minutes=opt_min,
-                          id="optimizer_agent", replace_existing=True)
+        sched.add_job(_optimizer_tick, "interval", minutes=1,
+                      id="optimizer_agent", replace_existing=True)
 
         # ---- Deep position reconciliation (twice daily) -----------
         # The 15-min light pass above only detects PRESENCE mismatches

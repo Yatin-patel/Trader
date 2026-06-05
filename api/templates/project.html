@@ -1,10 +1,41 @@
 {% extends "_layout.html" %}
 {% block title %}{{ project.project_name }}{% endblock %}
 {% block content %}
-<div id="project-root" data-project-id="{{ project.project_id }}" hidden></div>
+<div id="project-root" data-project-id="{{ project.project_id }}"
+     data-broker-type="{{ project.broker_type or 'alpaca' }}"
+     data-has-etrade-token="{{ '1' if project.etrade_access_token else '0' }}"
+     hidden></div>
 
 <!-- Warnings -->
 <div id="warnings"></div>
+
+{% if (project.broker_type or 'alpaca') == 'etrade'
+      and project.etrade_access_token %}
+<!-- ETrade account picker (only when OAuth is complete) -->
+<section class="panel" id="etrade-account-picker">
+  <header class="panel-head">
+    <div>
+      <h2>ETrade account</h2>
+      <span class="muted">
+        Which ETrade account this project trades through.
+        <code id="etrade-current-key">—</code>
+      </span>
+    </div>
+    <button class="btn small ghost" id="etrade-reload-accounts"
+            type="button">Refresh list</button>
+  </header>
+  <div style="padding: 12px 24px;">
+    <select id="etrade-account-select" style="min-width: 360px;">
+      <option value="">Loading…</option>
+    </select>
+    <button class="btn small primary" id="etrade-save-account"
+            type="button" disabled>Save selection</button>
+    <p class="muted" style="margin-top: 8px; font-size: 12px;" id="etrade-status">
+      Fetched from ETrade /accounts/list.
+    </p>
+  </div>
+</section>
+{% endif %}
 
 <!-- Performance summary (top) -->
 <section class="cards">
@@ -269,4 +300,8 @@
 </script>
 
 <script src="/static/project_dashboard.js?v=10"></script>
+{% if (project.broker_type or 'alpaca') == 'etrade'
+      and project.etrade_access_token %}
+<script src="/static/etrade_account_picker.js?v=1"></script>
+{% endif %}
 {% endblock %}

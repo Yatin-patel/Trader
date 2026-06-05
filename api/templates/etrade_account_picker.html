@@ -1,0 +1,60 @@
+{% extends "_layout.html" %}
+{% block title %}Pick ETrade account · {{ project.project_name }}{% endblock %}
+{% block content %}
+<section class="panel">
+  <header class="panel-head">
+    <div>
+      <h1>Choose an ETrade account</h1>
+      <span class="muted">
+        OAuth is complete for {{ project.project_name }}. ETrade returned
+        <strong>{{ accounts | length }}</strong> account(s). Pick which
+        one this project should trade with.
+      </span>
+    </div>
+  </header>
+
+  <form method="post"
+        action="/etrade/account_callback"
+        style="padding: 16px 24px;">
+    <input type="hidden" name="project_id" value="{{ project.project_id }}">
+    <table class="data">
+      <thead>
+        <tr>
+          <th style="width: 40px;"></th>
+          <th>Account ID</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Mode</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in accounts %}
+        <tr>
+          <td>
+            <input type="radio" name="account_id_key"
+                   value="{{ a.accountIdKey }}"
+                   {% if loop.index == 1 %}checked{% endif %}>
+          </td>
+          <td><code>{{ a.accountId }}</code></td>
+          <td>{{ a.accountType or "—" }}</td>
+          <td>{{ a.accountDesc or a.accountDescription or "—" }}</td>
+          <td>{{ a.accountMode or "—" }}</td>
+          <td>{{ a.accountStatus or "ACTIVE" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div style="margin-top: 20px; display: flex; gap: 12px;">
+      <button type="submit" class="btn primary">Use this account</button>
+      <a class="btn ghost" href="/projects/{{ project.project_id }}">
+        Cancel
+      </a>
+    </div>
+    <p class="muted" style="margin-top: 12px; font-size: 12px;">
+      You can switch later from the project settings page.
+    </p>
+  </form>
+</section>
+{% endblock %}
