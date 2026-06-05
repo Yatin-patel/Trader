@@ -128,6 +128,14 @@ def humanize_event(event: dict[str, Any]) -> dict[str, Any]:
     elif node == "Admin" and et == "RESET_PAPER":
         icon, kind = "💰", "admin"
         message = f"Reset paper account to {_fmt_money(payload.get('cash', 0))}"
+    elif node == "Watchdog" and et == "WORKER_RESTART":
+        reason = payload.get("reason", "?")
+        icon, kind = "🩺", "admin"
+        message = (
+            f"Watchdog restarted the worker for this project "
+            f"(reason: {reason}). Cycles should resume on the next "
+            f"tick — no action needed."
+        )
     elif node == "Optimizer" and et == "AUTO_APPLY":
         applied = payload.get("applied") or {}
         title = payload.get("title") or ""

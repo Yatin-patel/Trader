@@ -64,7 +64,30 @@ async def lifespan(app: FastAPI):
     if getattr(app.state, "autorun", False):
         global _runner, _runner_task
         _runner = MultiTenantRunner()
+
+        def _on_runner_done(task: asyncio.Task) -> None:
+            # If the runner task dies for any reason (NameError, OAuth
+            # blowup, anything escaping run_forever), make it LOUD.
+            # Yesterday it died silently with a NameError on a refactor
+            # leftover and trading stopped for 12 hours before anyone
+            # noticed — this prevents that class of silence.
+            try:
+                exc = task.exception()
+            except (asyncio.CancelledError, Exception):
+                exc = None
+            if exc is not None:
+                logger.exception(
+                    "MULTI-TENANT RUNNER DIED — no cycles will fire "
+                    "until restart. Exception: %r", exc,
+                )
+            elif not task.cancelled():
+                logger.error(
+                    "MULTI-TENANT RUNNER EXITED CLEANLY — no cycles "
+                    "will fire until restart.",
+                )
+
         _runner_task = asyncio.create_task(_runner.run_forever())
+        _runner_task.add_done_callback(_on_runner_done)
     yield
     if _runner is not None:
         _runner.stop()

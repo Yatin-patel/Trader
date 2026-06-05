@@ -366,10 +366,14 @@ class MultiTenantRunner:
 
         sched.start()
         self._scheduler = sched
+        # NB: recon_min was removed in the per-project-interval refactor —
+        # the recon tick now runs every minute and gates per-project, so
+        # there's no single 'recon=Nm' value to log. Same for the
+        # optimizer.
         logger.info("schedulers running: digest@%02dUTC backup@%02dUTC "
-                    "recon=%dm orders=%ds anomalies=15m recs=weekly "
-                    "dca=hourly rebalance@13:30UTC",
-                    hour, backup_hour, recon_min, order_sec)
+                    "recon=1m(gated) orders=%ds anomalies=15m recs=weekly "
+                    "dca=hourly rebalance@13:30UTC optimizer=1m(gated)",
+                    hour, backup_hour, order_sec)
 
     async def _reconcile(self) -> None:
         try:
@@ -395,8 +399,89 @@ class MultiTenantRunner:
                     task.cancel()
                 self._workers.pop(pid, None)
 
+        # --- WATCHDOG --------------------------------------------------
+        # Two failure modes we've seen in prod kill cycles silently:
+        #   1. The worker's asyncio task finishes (.done() is True)
+        #      because of an unhandled exception that escaped both
+        #      _tick() and run_forever() catches. The task object stays
+        #      in self._tasks but ticks have stopped firing.
+        #   2. The task is still "running" but hasn't logged a
+        #      Worker.LOOP event in a long time — could be a deadlock,
+        #      a blocked Alpaca HTTP call holding the loop, or a
+        #      perpetual sleep on a bogus next_open value.
+        # Both look like "no trades for 12 hours" from the user side.
+        # The watchdog tears down stuck workers and forces a fresh
+        # task to be created in the next loop of this method.
+        from datetime import datetime, timedelta, timezone
+        from db.repositories import EventsRepo
+        now_utc = datetime.now(tz=timezone.utc)
+        # Stale threshold: 15 min during market hours, 35 min off-hours
+        # (covers the 5-min market-closed-sleep clamp plus margin).
+        # We use a conservative single threshold here so we don't depend
+        # on the broker clock at watchdog time.
+        STALE_MINS = 20
+        for pid in list(self._workers.keys()):
+            reason = None
+            task = self._tasks.get(pid)
+            if task is not None and task.done():
+                reason = "task_dead"
+                # Surface the exception if there was one — helpful for
+                # post-mortem even when the worker self-restarts.
+                exc = None
+                try:
+                    exc = task.exception()
+                except Exception:
+                    pass
+                if exc is not None:
+                    logger.error(
+                        "watchdog: worker task for %s died with: %r",
+                        pid, exc,
+                    )
+            else:
+                try:
+                    events = EventsRepo.recent(pid, limit=12)
+                except Exception:
+                    events = []
+                latest_loop = next(
+                    (e for e in events
+                     if e["node_name"] == "Worker"
+                     and e["event_type"] == "LOOP"),
+                    None,
+                )
+                if latest_loop is not None:
+                    ts = latest_loop["created_at"]
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if now_utc - ts > timedelta(minutes=STALE_MINS):
+                        reason = "stale_heartbeat"
+            if reason is None:
+                continue
+            logger.warning(
+                "watchdog: restarting tenant worker %s (reason=%s)",
+                pid, reason,
+            )
+            try:
+                EventsRepo.log(pid, "Watchdog", "WORKER_RESTART", {
+                    "reason": reason,
+                    "narrative": [
+                        f"Runner watchdog restarted this project's "
+                        f"worker (reason: {reason}). Cycles should "
+                        f"resume on the next scheduler tick.",
+                    ],
+                })
+            except Exception:
+                pass
+            try:
+                self._workers[pid].stop()
+            except Exception:
+                pass
+            task = self._tasks.pop(pid, None)
+            if task and not task.done():
+                task.cancel()
+            self._workers.pop(pid, None)
+
         # Start workers for new active projects (any broker), respecting
-        # concurrency.
+        # concurrency. Also catches workers the watchdog just tore down.
         for pid in active_pids:
             if pid in self._workers:
                 continue

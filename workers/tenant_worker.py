@@ -123,14 +123,57 @@ class TenantWorker:
         self._stop_event.set()
 
     async def run_forever(self) -> None:
+        """Never let an exception escape this loop. Yesterday three
+        workers silently died after 20:53 ET and didn't tick again for
+        12 hours — anything that would crash the task gets logged and
+        we sleep + continue. The runner's watchdog still restarts a
+        task that .done() returns True for, so if the process is so
+        deeply hosed it can't even reach this except, the watchdog
+        catches it. Belt + suspenders."""
         logger.info("tenant worker started: %s", self.project_id)
-        while not self._stop_event.is_set():
-            wait_seconds = await self._tick()
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=wait_seconds)
-            except asyncio.TimeoutError:
-                pass
-        logger.info("tenant worker stopped: %s", self.project_id)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    wait_seconds = await self._tick()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # _tick() already catches its own exceptions and
+                    # logs a Worker.ERROR row. If something gets past
+                    # it (network blip during the EventsRepo.log call,
+                    # DB connection drop, etc.) we still want the loop
+                    # alive. Sleep one cycle and try again.
+                    logger.exception(
+                        "tenant worker tick crashed for %s — "
+                        "loop continues",
+                        self.project_id,
+                    )
+                    try:
+                        EventsRepo.log(
+                            self.project_id, "Worker", "ERROR",
+                            {"err": "unhandled exception in tick"},
+                        )
+                    except Exception:
+                        pass
+                    wait_seconds = self._cycle_interval()
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=wait_seconds)
+                except asyncio.TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "tenant worker sleep crashed for %s — "
+                        "loop continues",
+                        self.project_id,
+                    )
+        except asyncio.CancelledError:
+            logger.info("tenant worker cancelled: %s", self.project_id)
+            raise
+        finally:
+            logger.info("tenant worker stopped: %s", self.project_id)
 
     async def _tick(self) -> int:
         """Run one cycle if the market is open; otherwise return seconds to wait."""
