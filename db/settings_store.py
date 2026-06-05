@@ -218,10 +218,22 @@ class ProjectSettings:
         "reconcile_interval_min":        (0,        "int",    "Minutes between the light DB-vs-broker reconciler ticks for THIS project. 0 (default) inherits the global AppSettings value (which defaults to 15). Lower this for high-activity projects where divergence costs money."),
         "loop_interval_seconds":         (60,      "int",    "Seconds between scan->execute cycles for this project (overrides global)"),
         "order_time_in_force":           ("day",   "string", "Default time-in-force for submitted orders"),
-        "strategy_mode":                 ("wheel", "string", "What this project trades: 'wheel' (CSP+CC options income — default), 'wheel_plus_dca' (options + scheduled stock buys), 'dca_only' (long-term stock accumulation, no options), 'paused' (don't trade — for manual review). Day-trading and multi-leg spreads are not yet implemented."),
+        "strategy_mode":                 ("wheel", "string", "What this project trades. WHEEL FAMILY: 'wheel' (CSP+CC options income — default), 'wheel_plus_dca' (options + scheduled stock buys), 'dca_only' (long-term stock accumulation, no options). MULTI-LEG SPREADS: 'bull_put_spread' (bullish credit), 'bear_call_spread' (bearish credit), 'bull_call_spread' (bullish debit), 'bear_put_spread' (bearish debit), 'iron_condor' (neutral, 4-leg), 'calendar_spread' (theta). DAY-TRADING: 'intraday_momentum' (0DTE/1DTE long calls or puts driven by intraday RSI/MACD/VWAP signals — requires allow_0dte or allow_1dte to be on). 'paused' = don't trade. All modes work on both Alpaca and ETrade."),
         "use_extended_hours":            (False,   "bool",   "Allow trades during extended hours"),
         "income_cadence":                ("custom","string", "Income cadence preset: weekly | biweekly | monthly | custom. When set to a preset, the strategist overrides csp_min_dte / csp_max_dte / csp_delta_min / csp_delta_max with the preset values, and auto-roll will roll any open contract whose remaining DTE drifts outside the preset band."),
         "dry_run":                       (True,    "bool",   "If true, skip order submission and only log decisions"),
+        # --- Multi-leg spread tunables (used when strategy_mode is one of
+        # the *_spread modes or iron_condor) --------------------------------
+        "spread_target_delta":           (0.25,    "float",  "Target |delta| for the SHORT leg of a credit vertical / iron condor (e.g. 0.25 = ~25-delta short option). For debit spreads (bull_call / bear_put) this is the long-leg delta."),
+        "spread_width":                  (5.0,     "float",  "Distance in dollars between the two legs of a vertical, or the wing width of an iron condor."),
+        "spread_min_dte":                (21,      "int",    "Minimum days-to-expiration for spread setups."),
+        "spread_max_dte":                (45,      "int",    "Maximum days-to-expiration for spread setups."),
+        # --- Calendar-spread specific ---------------------------------------
+        "calendar_option_type":          ("call",  "string", "Calendar spread leg type: 'call' or 'put'."),
+        "calendar_short_dte":            (14,      "int",    "Target DTE for the calendar's short (near-month) leg."),
+        "calendar_long_dte":             (45,      "int",    "Target DTE for the calendar's long (back-month) leg."),
+        # --- Intraday / day-trading -----------------------------------------
+        "intraday_max_trades_per_cycle": (3,       "int",    "Hard cap on how many 0DTE/1DTE trades the strategist will open per cycle. Independent of the PDT 5-day window cap."),
     }
 
     @classmethod

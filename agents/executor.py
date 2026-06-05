@@ -17,6 +17,62 @@ from execution import get_broker
 logger = logging.getLogger(__name__)
 
 
+# Trade types this executor knows how to submit. Anything outside this
+# set is treated as a configuration error and gets a one-line REJECTED.
+_WHEEL_TYPES = ("CSP", "CC", "STOCK_BUY")
+_SPREAD_TYPES = (
+    "BULL_PUT_SPREAD", "BEAR_CALL_SPREAD",
+    "BULL_CALL_SPREAD", "BEAR_PUT_SPREAD",
+    "IRON_CONDOR", "CALENDAR_SPREAD",
+)
+_INTRADAY_TYPES = ("INTRADAY_LONG_CALL", "INTRADAY_LONG_PUT")
+
+# Map spread trade-type → (module, class). Mirrors strategy_dispatcher
+# but inverted so the executor doesn't have to import the dispatcher.
+_SPREAD_EXECUTORS: dict[str, tuple[str, str]] = {
+    "BULL_PUT_SPREAD":  ("strategies.vertical_spreads", "BullPutSpreadStrategy"),
+    "BEAR_CALL_SPREAD": ("strategies.vertical_spreads", "BearCallSpreadStrategy"),
+    "BULL_CALL_SPREAD": ("strategies.vertical_spreads", "BullCallSpreadStrategy"),
+    "BEAR_PUT_SPREAD":  ("strategies.vertical_spreads", "BearPutSpreadStrategy"),
+    "IRON_CONDOR":      ("strategies.iron_condor",      "IronCondorStrategy"),
+    "CALENDAR_SPREAD":  ("strategies.calendar_spread",  "CalendarSpreadStrategy"),
+}
+
+
+def _execute_spread(project_id: str, trade: dict[str, Any]) -> dict[str, Any]:
+    """Hand the spread back to its strategy class's execute() method.
+    Returns an `order` dict shaped like the wheel result so the
+    executor's result accounting stays uniform."""
+    ttype = str(trade.get("type") or "").upper()
+    module_name, class_name = _SPREAD_EXECUTORS[ttype]
+    module = __import__(module_name, fromlist=[class_name])
+    StrategyCls = getattr(module, class_name)
+    strat = StrategyCls(project_id)
+    setup = trade.get("setup") or {}
+    if not setup:
+        raise RuntimeError(
+            f"trade.setup missing for {ttype} on "
+            f"{trade.get('ticker')}; the strategy dispatcher must "
+            "carry the full setup forward.")
+    qty = max(1, int(trade.get("quantity") or 1))
+    result = strat.execute(setup, qty)
+    if not result.get("success"):
+        raise RuntimeError(result.get("error") or "spread execution failed")
+    return result
+
+
+def _execute_intraday(client: Any, trade: dict[str, Any],
+                      tif: str) -> dict[str, Any]:
+    """Intraday longs are simple single-leg buys."""
+    return client.submit_limit_option(
+        option_symbol=trade["option_symbol"],
+        qty=max(1, int(trade.get("quantity") or 1)),
+        side="buy",
+        limit_price=float(trade["premium"]),
+        time_in_force=tif,
+    )
+
+
 def execute_orders_node(state: dict[str, Any]) -> dict[str, Any]:
     project_id = state["project_id"]
     project = ProjectsRepo.get(project_id)
@@ -38,6 +94,26 @@ def execute_orders_node(state: dict[str, Any]) -> dict[str, Any]:
 
     client = get_broker(project)
     results: list[dict[str, Any]] = []
+
+    # PDT pre-flight: short-circuit all intraday opens if the account
+    # is sub-$25k and already at 3 day-trades in the rolling 5-day
+    # window. Wheel + spread cycles are unaffected (they're swing /
+    # multi-day positions, not day trades). The Guardrail's collateral
+    # checks remain authoritative for everything else.
+    pdt_blocked = False
+    pdt_block_reason = ""
+    if any(
+        str(t.get("type") or "").upper() in _INTRADAY_TYPES
+        for t in trades
+    ):
+        try:
+            from risk.pdt_guard import pdt_can_trade
+            ok, reason = pdt_can_trade(project_id)
+            if not ok:
+                pdt_blocked = True
+                pdt_block_reason = reason
+        except Exception:
+            logger.exception("pdt guard check failed; allowing trade")
 
     # Snapshot of strategy params at trade time — copied onto each
     # opened contract for later attribution analysis.
@@ -187,6 +263,49 @@ def execute_orders_node(state: dict[str, Any]) -> dict[str, Any]:
                     except Exception:
                         logger.exception("orders tracker failed")
                     results.append({"trade": trade, "status": "SUBMITTED", "order": order})
+
+            elif trade["type"] in _SPREAD_TYPES:
+                # Defined-risk multi-leg spreads. Phase-1 implementation
+                # uses the existing per-strategy execute() methods which
+                # submit each leg as an independent single-leg order
+                # via the broker's submit_limit_option. Phase-2 / Phase-3
+                # will replace this with broker-native atomic multi-leg
+                # orders (Alpaca mleg / ETrade SPREADS|IRON_CONDOR).
+                if dry_run:
+                    results.append({"trade": trade, "status": "DRY_RUN"})
+                else:
+                    spread_result = _execute_spread(project_id, trade)
+                    results.append({
+                        "trade": trade,
+                        "status": "SUBMITTED",
+                        "order": spread_result,
+                    })
+
+            elif trade["type"] in _INTRADAY_TYPES:
+                # 0DTE / 1DTE long calls / puts driven by the intraday
+                # momentum strategist.
+                if pdt_blocked:
+                    results.append({
+                        "trade": trade, "status": "REJECTED",
+                        "reason": "PDT: " + pdt_block_reason,
+                    })
+                    continue
+                if dry_run:
+                    results.append({"trade": trade, "status": "DRY_RUN"})
+                else:
+                    order = _execute_intraday(client, trade, tif)
+                    results.append({
+                        "trade": trade,
+                        "status": "SUBMITTED",
+                        "order": order,
+                    })
+                    # Note: day-trade counting (log_day_trade) happens at
+                    # CLOSE, not open — it takes both open + close order
+                    # IDs and only counts as a day-trade if both fills
+                    # land on the same trading day. The close path lives
+                    # in risk.take_profit / risk.auto_roll / manual-close
+                    # endpoints; intraday closes there should call
+                    # log_day_trade.
 
             elif trade["type"] == "STOCK_BUY":
                 if dry_run:

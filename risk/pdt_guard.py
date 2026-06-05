@@ -51,7 +51,7 @@ def count_day_trades_5d(project_id: str) -> int:
             WHERE project_id = :p AND trade_date >= :cutoff
         """), {"p": project_id, "cutoff": cutoff}).fetchone()
 
-    return trade_id if row else 0
+    return int(row[0]) if row else 0
 
 
 def log_day_trade(
@@ -77,25 +77,9 @@ def log_day_trade(
         trade_date = datetime.now(tz=timezone.utc)
 
     with session_scope() as s:
-        # Ensure table exists
-        s.execute(text("""
-            IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'day_trade_log')
-            BEGIN
-                CREATE TABLE day_trade_log (
-                    trade_id BIGINT IDENTITY(1,1) PRIMARY KEY,
-                    project_id VARCHAR(64) NOT NULL,
-                    symbol VARCHAR(64) NOT NULL,
-                    open_order_id VARCHAR(64) NOT NULL,
-                    close_order_id VARCHAR(64) NOT NULL,
-                    trade_date DATETIME(6) NOT NULL,
-                    created_at DATETIME(6) NOT NULL DEFAULT UTC_TIMESTAMP()
-                );
-                CREATE INDEX IX_day_trade_log_project_date
-                    ON day_trade_log(project_id, trade_date);
-            END
-        """))
-        s.commit()
-
+        # day_trade_log is owned by db/schema_mysql.sql — no lazy DDL
+        # needed (the old SQL Server CREATE TABLE here didn't run on
+        # MySQL anyway).
         trade_id = insert_returning_id(s, """
             INSERT INTO day_trade_log
                 (project_id, symbol, open_order_id, close_order_id, trade_date)
@@ -109,7 +93,7 @@ def log_day_trade(
         })
         s.commit()
 
-    return trade_id if row else 0
+    return trade_id if trade_id else 0
 
 
 def get_account_equity(project_id: str) -> float | None:

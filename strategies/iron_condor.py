@@ -13,51 +13,16 @@ from sqlalchemy import text
 
 from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
-from db.settings_store import ProjectSettings
-from execution import AlpacaClient
+from db.settings_store import ProjectSettings  # noqa: F401  (legacy import)
+from execution import get_broker
 
 logger = logging.getLogger(__name__)
 
-
-def _ensure_multi_leg_table() -> None:
-    """Create multi-leg orders table if it doesn't exist."""
-    with session_scope() as s:
-        s.execute(text("""
-            IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'multi_leg_orders')
-            BEGIN
-                CREATE TABLE multi_leg_orders (
-                    order_id BIGINT IDENTITY(1,1) PRIMARY KEY,
-                    project_id VARCHAR(64) NOT NULL,
-                    strategy_type VARCHAR(32) NOT NULL,
-                    underlying VARCHAR(12) NOT NULL,
-                    status VARCHAR(20) NOT NULL DEFAULT 'OPEN',
-                    leg1_symbol VARCHAR(64) NULL,
-                    leg1_side VARCHAR(8) NULL,
-                    leg1_qty INT NULL,
-                    leg2_symbol VARCHAR(64) NULL,
-                    leg2_side VARCHAR(8) NULL,
-                    leg2_qty INT NULL,
-                    leg3_symbol VARCHAR(64) NULL,
-                    leg3_side VARCHAR(8) NULL,
-                    leg3_qty INT NULL,
-                    leg4_symbol VARCHAR(64) NULL,
-                    leg4_side VARCHAR(8) NULL,
-                    leg4_qty INT NULL,
-                    net_credit DECIMAL(18,4) NULL,
-                    max_loss DECIMAL(18,4) NULL,
-                    max_profit DECIMAL(18,4) NULL,
-                    expiration DATE NULL,
-                    opened_at DATETIME(6) NOT NULL DEFAULT UTC_TIMESTAMP(),
-                    closed_at DATETIME(6) NULL,
-                    realized_pnl DECIMAL(18,4) NULL,
-                    CONSTRAINT FK_multi_leg_orders_project FOREIGN KEY (project_id)
-                        REFERENCES trading_projects(project_id) ON DELETE CASCADE
-                );
-                CREATE INDEX IX_multi_leg_orders_project_status
-                    ON multi_leg_orders(project_id, status);
-            END
-        """))
-        s.commit()
+# NB: the multi_leg_orders table is owned by db/schema_mysql.sql — no
+# need to create it lazily here. The old _ensure_multi_leg_table() used
+# T-SQL syntax (IF NOT EXISTS … BEGIN/END, IDENTITY) that doesn't run on
+# the MySQL production database anyway, so leaving it would break the
+# first call.
 
 
 class IronCondorStrategy:
@@ -75,7 +40,7 @@ class IronCondorStrategy:
         self.project = ProjectsRepo.get(project_id)
         if self.project is None:
             raise ValueError(f"Project {project_id} not found")
-        self.client = AlpacaClient(self.project)
+        self.client = get_broker(self.project)
 
     def find_setup(
         self,
@@ -265,8 +230,6 @@ class IronCondorStrategy:
         Returns:
             Execution result
         """
-        _ensure_multi_leg_table()
-
         legs = setup["legs"]
         orders = []
 
@@ -332,8 +295,6 @@ class IronCondorStrategy:
                 })
                 s.commit()
 
-            order_id = int(row[0]) if row else None
-
             EventsRepo.log(self.project_id, "IronCondor", "EXECUTE", {
                 "order_id": order_id,
                 "ticker": setup["ticker"],
@@ -358,17 +319,7 @@ def list_iron_condors(
     project_id: str,
     status: str | None = None
 ) -> list[dict[str, Any]]:
-    """List iron condor positions.
-
-    Args:
-        project_id: Trading project ID
-        status: Filter by status (OPEN, CLOSED)
-
-    Returns:
-        List of positions
-    """
-    _ensure_multi_leg_table()
-
+    """List iron condor positions."""
     sql = """
         SELECT order_id, underlying, status, leg1_symbol, leg2_symbol,
                leg3_symbol, leg4_symbol, net_credit, max_loss, max_profit,

@@ -39,11 +39,17 @@ def intraday_scan_node(state: dict[str, Any]) -> dict[str, Any]:
     if not scanner_enabled:
         return {"intraday_signals": []}
 
-    # Check if market is open
+    # Check if market is open via the broker-agnostic clock surface
+    # (ETradeClient doesn't expose is_market_open; both expose get_clock).
     client = get_broker(project)
-    if not client.is_market_open():
-        logger.debug("Market closed, skipping intraday scan")
-        return {"intraday_signals": []}
+    try:
+        if not bool(client.get_clock().get("is_open")):
+            logger.debug("Market closed, skipping intraday scan")
+            return {"intraday_signals": []}
+    except Exception:
+        # If the clock call fails we err on the side of running — the
+        # tenant worker's own market-hours gate already ran.
+        pass
 
     try:
         signals = scan_intraday_opportunities(project_id)

@@ -221,10 +221,17 @@
       'monthly':  'Sells 25-35 DTE puts at delta 0.25-0.40. Largest premiums, ~12 trades/year, capital locked up longest. Best premium-to-management ratio for a hands-off wheel.'
     } %}
     {% set strategy_mode_help = {
-      'wheel':          'Options income. Sells cash-secured puts on your watchlist; if assigned, sells covered calls against the shares. Pure options + collected-premium income. (Default — what most projects should run.)',
-      'wheel_plus_dca': 'Wheel (above) + scheduled dollar-cost-averaging stock buys on tickers you set up in DCA. Options income AND steady long-term stock accumulation in parallel.',
-      'dca_only':       'No options. Just runs your DCA schedules to buy stock on a cadence (daily / weekly / monthly). Long-term stock accumulation. Tax-lot accounting tracks holding period for capital-gains.',
-      'paused':         'Project does nothing. The runner skips all cycles. Use this for manual review, broker-side maintenance, or pausing without deleting the project.'
+      'wheel':             'Options income. Sells cash-secured puts on your watchlist; if assigned, sells covered calls against the shares. Pure options + collected-premium income. (Default — what most projects should run.)',
+      'wheel_plus_dca':    'Wheel (above) + scheduled dollar-cost-averaging stock buys on tickers you set up in DCA. Options income AND steady long-term stock accumulation in parallel.',
+      'dca_only':          'No options. Just runs your DCA schedules to buy stock on a cadence (daily / weekly / monthly). Long-term stock accumulation. Tax-lot accounting tracks holding period for capital-gains.',
+      'bull_put_spread':   'Defined-risk bullish CREDIT spread. Sells a put at ~spread_target_delta and buys a further-OTM put spread_width below for protection. Profit if stock stays above the short strike at expiry. Lower capital + lower P/L than a naked CSP.',
+      'bear_call_spread':  'Defined-risk bearish CREDIT spread. Sells an OTM call at ~spread_target_delta and buys a further-OTM call spread_width above for protection. Profit if stock stays below the short strike.',
+      'bull_call_spread':  'Defined-risk bullish DEBIT spread. Buys an ATM-ish call and sells one further-OTM. Pays a debit up front; profit if stock rises through the short strike.',
+      'bear_put_spread':   'Defined-risk bearish DEBIT spread. Buys an ATM-ish put and sells one further-OTM (lower strike). Profit if stock falls through the short strike.',
+      'iron_condor':       'Neutral / range-bound. Sells a bull-put spread AND a bear-call spread on the same expiry, collecting two credits. Defined risk on both sides. Profit if stock stays inside the body at expiry.',
+      'calendar_spread':   'Theta-positive horizontal spread. Sells a short-DTE option and buys a longer-DTE option at the same strike. Profits from near-leg time decay outpacing the back leg. Uses calendar_short_dte / calendar_long_dte / calendar_option_type.',
+      'intraday_momentum': 'Day-trading. The intraday scanner watches RSI / MACD / VWAP signals during RTH and the strategist buys 0DTE or 1DTE long calls (BUY signal) or long puts (SELL signal) on the strongest setups. Requires allow_0dte and/or allow_1dte to be on. PDT rules enforced automatically.',
+      'paused':            'Project does nothing. The runner skips all cycles. Use this for manual review, broker-side maintenance, or pausing without deleting the project.'
     } %}
     {% set trading_plan_help = {
       'conservative': 'Smaller positions, longer DTE, narrower delta band. The Optimizer Agent takes tiny steps (≤15% per cycle) and prefers variance-reducing changes even at the cost of premium.',
@@ -251,7 +258,7 @@
           </select>
         {% elif s.key == 'strategy_mode' %}
           <select data-value data-help-map='{{ strategy_mode_help | tojson }}'>
-            {% for opt in ['wheel', 'wheel_plus_dca', 'dca_only', 'paused'] %}
+            {% for opt in ['wheel', 'wheel_plus_dca', 'dca_only', 'bull_put_spread', 'bear_call_spread', 'bull_call_spread', 'bear_put_spread', 'iron_condor', 'calendar_spread', 'intraday_momentum', 'paused'] %}
               <option value="{{ opt }}" {% if s.value == opt %}selected{% endif %} title="{{ strategy_mode_help[opt] }}">{{ opt }}</option>
             {% endfor %}
           </select>

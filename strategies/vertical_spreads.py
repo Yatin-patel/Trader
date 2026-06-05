@@ -11,23 +11,16 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import text
-
 from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
-from execution import AlpacaClient
+from execution import get_broker
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_multi_leg_table() -> None:
-    """Create multi-leg orders table if it doesn't exist."""
-    from strategies.iron_condor import _ensure_multi_leg_table as ensure
-    ensure()
-
-
 class VerticalSpreadStrategy:
-    """Base class for vertical spread strategies."""
+    """Base class for vertical spread strategies. Broker-agnostic — uses
+    the project's configured broker (Alpaca or ETrade) via get_broker()."""
 
     strategy_type: str = "VERTICAL_SPREAD"
 
@@ -36,7 +29,7 @@ class VerticalSpreadStrategy:
         self.project = ProjectsRepo.get(project_id)
         if self.project is None:
             raise ValueError(f"Project {project_id} not found")
-        self.client = AlpacaClient(self.project)
+        self.client = get_broker(self.project)
 
     def find_contracts(
         self,
@@ -75,8 +68,6 @@ class VerticalSpreadStrategy:
         expiration: date | None
     ) -> int:
         """Record spread in database."""
-        _ensure_multi_leg_table()
-
         with session_scope() as s:
             order_id = insert_returning_id(s, """
                 INSERT INTO multi_leg_orders (
@@ -107,7 +98,7 @@ class VerticalSpreadStrategy:
             })
             s.commit()
 
-        return order_id if row else 0
+        return int(order_id) if order_id else 0
 
 
 class BullPutSpreadStrategy(VerticalSpreadStrategy):
@@ -615,8 +606,6 @@ def list_vertical_spreads(
     status: str | None = None
 ) -> list[dict[str, Any]]:
     """List vertical spread positions."""
-    _ensure_multi_leg_table()
-
     sql = """
         SELECT order_id, strategy_type, underlying, status,
                leg1_symbol, leg1_side, leg2_symbol, leg2_side,

@@ -207,10 +207,11 @@ class TenantWorker:
             return self._cycle_interval()
 
         # --- Strategy mode gate ----------------------------------------------
-        # The wheel pipeline (Scanner→Strategist→Guardrail→Executor) only
-        # runs when the project's strategy_mode includes options trading.
-        # DCA + Rebalancer + reconciliation are scheduled separately in
-        # MultiTenantRunner so they keep running regardless of mode.
+        # The Scanner→Strategist→Guardrail→Executor pipeline runs for any
+        # mode whose strategist produces option trades. DCA-only and
+        # Paused short-circuit here; everything else flows through.
+        # Reconcile + DCA + Rebalancer + Optimizer all run on their own
+        # MultiTenantRunner schedules so they keep working regardless.
         mode = str(ProjectSettings.get(self.project_id, "strategy_mode",
                                        default="wheel") or "wheel").lower()
         if mode == "paused":
@@ -226,9 +227,11 @@ class TenantWorker:
                 "note": "DCA buys still run on the hourly scheduler",
             })
             return self._cycle_interval()
-        # 'wheel' and 'wheel_plus_dca' both run the wheel pipeline here.
-        # ('wheel_plus_dca' just adds DCA on top — DCA runs from the
-        # MultiTenantRunner scheduler, not from this per-tenant worker.)
+        # Every other mode (wheel, wheel_plus_dca, bull_put_spread,
+        # bear_call_spread, bull_call_spread, bear_put_spread,
+        # iron_condor, calendar_spread, intraday_momentum) flows through
+        # the same graph — the dispatcher inside the Strategist node
+        # routes on strategy_mode to the right per-strategy logic.
 
         client = get_broker(project)
 

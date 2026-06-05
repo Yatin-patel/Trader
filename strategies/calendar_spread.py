@@ -13,15 +13,9 @@ from sqlalchemy import text
 
 from db.connection import insert_returning_id, session_scope
 from db.repositories import EventsRepo, ProjectsRepo
-from execution import AlpacaClient
+from execution import get_broker
 
 logger = logging.getLogger(__name__)
-
-
-def _ensure_multi_leg_table() -> None:
-    """Create multi-leg orders table if it doesn't exist."""
-    from strategies.iron_condor import _ensure_multi_leg_table as ensure
-    ensure()
 
 
 class CalendarSpreadStrategy:
@@ -38,7 +32,7 @@ class CalendarSpreadStrategy:
         self.project = ProjectsRepo.get(project_id)
         if self.project is None:
             raise ValueError(f"Project {project_id} not found")
-        self.client = AlpacaClient(self.project)
+        self.client = get_broker(self.project)
 
     def find_setup(
         self,
@@ -236,8 +230,6 @@ class CalendarSpreadStrategy:
         Returns:
             Execution result
         """
-        _ensure_multi_leg_table()
-
         try:
             # Sell short-term option
             o1 = self.client.submit_limit_option(
@@ -278,8 +270,6 @@ class CalendarSpreadStrategy:
                 })
                 s.commit()
 
-            order_id = int(row[0]) if row else None
-
             EventsRepo.log(self.project_id, "CalendarSpread", "EXECUTE", {
                 "order_id": order_id,
                 "ticker": setup["ticker"],
@@ -315,8 +305,6 @@ def roll_short_leg(
     Returns:
         Roll execution result
     """
-    _ensure_multi_leg_table()
-
     # Get existing position
     with session_scope() as s:
         row = s.execute(text("""
@@ -434,8 +422,6 @@ def list_calendar_spreads(
     status: str | None = None
 ) -> list[dict[str, Any]]:
     """List calendar spread positions."""
-    _ensure_multi_leg_table()
-
     sql = """
         SELECT order_id, underlying, status, leg1_symbol, leg2_symbol,
                net_credit, max_loss, expiration, opened_at
