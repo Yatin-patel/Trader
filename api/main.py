@@ -2968,6 +2968,41 @@ async def api_pnl_report(request: Request, project_id: str,
     stock_pnl = ClosedPositionsRepo.realized_pnl_since(project_id, fd)
     monthly = monthly_breakdown(project_id, fd, td)
     summary = metrics_summary(project_id, period="all")
+
+    # --- Broker-derived brokerage fees -----------------------------------
+    # ClosedContractsRepo.list returns brokerage_fee (NULL if not yet
+    # synced) and net_pnl (= realized_pnl − fee when known, else
+    # realized_pnl). Aggregate them here so the P&L report can show
+    # Brokerage Fees + Net Realized P&L cards + per-month + per-trade
+    # columns. NULL fees are tracked separately so the UI can show
+    # "pending sync (N trades)" rather than treating them as $0.
+    fees_known = [float(c["brokerage_fee"]) for c in contracts
+                  if c.get("brokerage_fee") is not None]
+    total_fees = round(sum(fees_known), 2)
+    pending_fee_sync = sum(1 for c in contracts
+                           if c.get("brokerage_fee") is None)
+
+    # Roll fees into the monthly view too (post-process so we keep the
+    # monthly_breakdown SQL pure).
+    fees_by_month: dict[str, float] = {}
+    pending_by_month: dict[str, int] = {}
+    for c in contracts:
+        ts = c.get("closed_at")
+        if not ts:
+            continue
+        ym = (ts if isinstance(ts, datetime)
+              else datetime.fromisoformat(str(ts))).strftime("%Y-%m")
+        if c.get("brokerage_fee") is not None:
+            fees_by_month[ym] = (
+                fees_by_month.get(ym, 0.0) + float(c["brokerage_fee"]))
+        else:
+            pending_by_month[ym] = pending_by_month.get(ym, 0) + 1
+    for m in monthly:
+        f = round(fees_by_month.get(m["month"], 0.0), 2)
+        m["brokerage_fee"] = f
+        m["net_pnl"] = round(m["realized_pnl"] - f, 2)
+        m["pending_fee_sync"] = pending_by_month.get(m["month"], 0)
+
     # Override the period summary to reflect this date range, not "all".
     pnl_values = [c["realized_pnl"] for c in contracts]
     total_pnl = sum(pnl_values) + stock_pnl
@@ -3023,6 +3058,13 @@ async def api_pnl_report(request: Request, project_id: str,
         "realized_pnl": round(total_pnl, 2),
         "option_pnl": round(sum(pnl_values), 2),
         "stock_pnl": round(stock_pnl, 2),
+        # Broker-derived fees. pending_fee_sync = count of closures whose
+        # fee row hasn't surfaced on broker activities/transactions yet.
+        # Excluded from total_fees so the user can tell "synced as $0"
+        # from "not synced".
+        "brokerage_fees": total_fees,
+        "realized_pnl_net": round(total_pnl - total_fees, 2),
+        "pending_fee_sync": pending_fee_sync,
         "total_premium": round(total_premium, 2),
         "trade_count": trade_count,
         "win_rate": (round(len(wins) / trade_count, 4)
@@ -3112,7 +3154,17 @@ async def api_pnl_report_csv(request: Request, project_id: str,
     w.writerow(["SUMMARY"])
     w.writerow(["Realized P&L (options)", f"{sum(pnl_values):.2f}"])
     w.writerow(["Realized P&L (stock)", f"{stock_pnl:.2f}"])
-    w.writerow(["Realized P&L (total)", f"{total_pnl:.2f}"])
+    w.writerow(["Realized P&L (total, pre-fees)", f"{total_pnl:.2f}"])
+    fees_known_csv = [float(c["brokerage_fee"]) for c in contracts
+                      if c.get("brokerage_fee") is not None]
+    pending_fee_csv = sum(1 for c in contracts
+                          if c.get("brokerage_fee") is None)
+    total_fees_csv = sum(fees_known_csv)
+    w.writerow(["Brokerage fees (synced)", f"{total_fees_csv:.2f}"])
+    if pending_fee_csv:
+        w.writerow(["Trades pending fee sync", pending_fee_csv])
+    w.writerow(["Net realized P&L (post-fees)",
+                f"{total_pnl - total_fees_csv:.2f}"])
     if starting_equity:
         w.writerow(["Starting capital", f"{starting_equity:.2f}"])
         w.writerow(["Capital reference", starting_source or ""])
@@ -3136,19 +3188,48 @@ async def api_pnl_report_csv(request: Request, project_id: str,
     w.writerow([])
     w.writerow(["MONTHLY BREAKDOWN"])
     w.writerow(["Month", "Realized P&L", "Premium captured",
-                "Trades", "Wins", "Losses", "Win rate"])
+                "Trades", "Wins", "Losses", "Win rate",
+                "Brokerage fees", "Net P&L", "Pending fee sync"])
+    # Bucket fees by month for the CSV monthly rows (same logic as the
+    # JSON endpoint — monthly_breakdown() doesn't carry fees because
+    # the SQL aggregator pre-dates the broker-derived sync).
+    fees_by_month_csv: dict[str, float] = {}
+    pending_by_month_csv: dict[str, int] = {}
+    from datetime import datetime as _dt
+    for c in contracts:
+        ts = c.get("closed_at")
+        if not ts:
+            continue
+        ym = (ts if isinstance(ts, _dt)
+              else _dt.fromisoformat(str(ts))).strftime("%Y-%m")
+        if c.get("brokerage_fee") is not None:
+            fees_by_month_csv[ym] = (
+                fees_by_month_csv.get(ym, 0.0)
+                + float(c["brokerage_fee"]))
+        else:
+            pending_by_month_csv[ym] = (
+                pending_by_month_csv.get(ym, 0) + 1)
     for m in monthly:
+        f = fees_by_month_csv.get(m["month"], 0.0)
+        net = m["realized_pnl"] - f
+        pending = pending_by_month_csv.get(m["month"], 0)
         w.writerow([m["month"], f'{m["realized_pnl"]:.2f}',
                     f'{m["premium_captured"]:.2f}',
                     m["trade_count"], m["wins"], m["losses"],
-                    f'{m["win_rate"]*100:.2f}%'])
+                    f'{m["win_rate"]*100:.2f}%',
+                    f'{f:.2f}', f'{net:.2f}', pending])
 
     w.writerow([])
     w.writerow(["CLOSED TRADES"])
     w.writerow(["Closed at", "Ticker", "Phase", "Strike", "Qty",
                 "Days held", "Premium collected", "Close cost",
-                "Realized P&L", "Reason"])
+                "Realized P&L", "Brokerage fee", "Net P&L", "Reason"])
     for c in contracts:
+        fee = c.get("brokerage_fee")
+        pnl = float(c.get("realized_pnl") or 0)
+        fee_str = (f'{float(fee):.4f}' if fee is not None else "pending")
+        net_str = (f'{(pnl - float(fee)):.4f}'
+                   if fee is not None else "pending")
         w.writerow([
             (c.get("closed_at") or ""),
             c.get("ticker") or "",
@@ -3158,7 +3239,9 @@ async def api_pnl_report_csv(request: Request, project_id: str,
             c.get("days_held") or "",
             f'{(c.get("premium_collected") or 0):.4f}',
             f'{(c.get("close_cost") or 0):.4f}',
-            f'{(c.get("realized_pnl") or 0):.4f}',
+            f'{pnl:.4f}',
+            fee_str,
+            net_str,
             c.get("closure_reason") or "",
         ])
 

@@ -121,9 +121,16 @@ CREATE TABLE IF NOT EXISTS closed_contracts (
     underlying_at_entry  DECIMAL(18,4) NULL,
     underlying_at_close  DECIMAL(18,4) NULL,
     settings_snapshot    TEXT NULL,
+    -- Broker-derived fees. NULL until the fees sync job populates them
+    -- from /v2/account/activities (Alpaca) or /v1/accounts/{id}/transactions
+    -- (ETrade). A NULL brokerage_fee means "not yet synced" — the P&L
+    -- report distinguishes this from a real $0 fee.
+    brokerage_fee        DECIMAL(18,4) NULL,
+    fee_synced_at        DATETIME(6) NULL,
     FOREIGN KEY (project_id) REFERENCES trading_projects(project_id) ON DELETE CASCADE,
     INDEX IX_closed_contracts_project_time (project_id, closed_at DESC),
-    INDEX IX_closed_contracts_ticker (project_id, ticker)
+    INDEX IX_closed_contracts_ticker (project_id, ticker),
+    INDEX IX_closed_contracts_pending_fees (project_id, fee_synced_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 8. Closed positions
@@ -575,6 +582,13 @@ ALTER TABLE backtest_runs
     ADD COLUMN from_date DATE NOT NULL DEFAULT '1970-01-01';
 ALTER TABLE wheel_contracts
     ADD COLUMN settings_snapshot LONGTEXT NULL;
+-- Broker-derived fees on closed contracts. NULL means "not yet synced".
+ALTER TABLE closed_contracts
+    ADD COLUMN brokerage_fee DECIMAL(18,4) NULL;
+ALTER TABLE closed_contracts
+    ADD COLUMN fee_synced_at DATETIME(6) NULL;
+ALTER TABLE closed_contracts
+    ADD INDEX IX_closed_contracts_pending_fees (project_id, fee_synced_at);
 
 -- 36. Tax lots (FIFO accounting)
 CREATE TABLE IF NOT EXISTS tax_lots (

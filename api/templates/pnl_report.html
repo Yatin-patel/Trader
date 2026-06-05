@@ -62,6 +62,19 @@
 
   <section class="pnl-cards cards">
     <div class="card">
+      <div class="card-label">Brokerage Fees</div>
+      <div class="card-value" id="card-fees">—</div>
+      <div class="card-sub muted" id="card-fees-sub">from broker activity feed</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Net P&amp;L (after fees)</div>
+      <div class="card-value" id="card-net">—</div>
+      <div class="card-sub muted" id="card-net-sub"></div>
+    </div>
+  </section>
+
+  <section class="pnl-cards cards">
+    <div class="card">
       <div class="card-label">Win Rate</div>
       <div class="card-value" id="card-winrate">—</div>
       <div class="card-sub muted" id="card-trades"></div>
@@ -94,10 +107,12 @@
           <th class="right">Wins</th>
           <th class="right">Losses</th>
           <th class="right">Win rate</th>
+          <th class="right">Fees</th>
+          <th class="right">Net P/L</th>
         </tr>
       </thead>
       <tbody>
-        <tr><td colspan="7" class="empty">No closed trades in this date range.</td></tr>
+        <tr><td colspan="9" class="empty">No closed trades in this date range.</td></tr>
       </tbody>
     </table>
   </section>
@@ -111,11 +126,13 @@
           <th class="right">Strike</th><th class="right">Qty</th>
           <th class="right">Days</th><th class="right">Premium</th>
           <th class="right">Close Cost</th><th class="right">P/L</th>
+          <th class="right" title="Broker-reported fees + commissions. Updates after the broker settles the fill (Alpaca: minutes; ETrade: same trading day).">Brokerage Fee</th>
+          <th class="right" title="Realized P/L minus brokerage fee for this trade.">Net P/L</th>
           <th>Reason</th>
         </tr>
       </thead>
       <tbody>
-        <tr><td colspan="10" class="empty">No closed trades in this date range.</td></tr>
+        <tr><td colspan="12" class="empty">No closed trades in this date range.</td></tr>
       </tbody>
     </table>
   </section>
@@ -156,5 +173,5 @@
   }
 </style>
 
-<script src="/static/pnl_report.js?v=1"></script>
+<script src="/static/pnl_report.js?v=2"></script>
 {% endblock %}

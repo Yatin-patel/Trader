@@ -87,6 +87,36 @@
     annEl.className = "card-value " + cls(s.annualized_pct);
 
     document.getElementById("card-premium").textContent = fmtMoney(s.total_premium);
+
+    // Brokerage fees + net P&L
+    const feeEl = document.getElementById("card-fees");
+    if (feeEl) {
+      feeEl.textContent = fmtMoney(s.brokerage_fees);
+      const sub = document.getElementById("card-fees-sub");
+      if (sub) {
+        if (s.pending_fee_sync && s.pending_fee_sync > 0) {
+          sub.textContent =
+            `${s.pending_fee_sync} trade(s) pending fee sync — checking broker every 15 min`;
+        } else {
+          sub.textContent = "from broker activity feed";
+        }
+      }
+    }
+    const netEl = document.getElementById("card-net");
+    if (netEl) {
+      netEl.textContent = fmtMoney(s.realized_pnl_net);
+      netEl.className = "card-value " + cls(s.realized_pnl_net);
+      const sub = document.getElementById("card-net-sub");
+      if (sub) {
+        if (s.pending_fee_sync && s.pending_fee_sync > 0) {
+          sub.textContent =
+            "preliminary — excludes pending fee sync";
+        } else {
+          sub.textContent = "realized P&L − brokerage fees";
+        }
+      }
+    }
+
     document.getElementById("card-winrate").textContent = fmtPct(s.win_rate);
     document.getElementById("card-trades").textContent =
       `${s.trade_count || 0} trades · ${s.wins || 0}W / ${s.losses || 0}L`;
@@ -116,17 +146,30 @@
     // Monthly breakdown
     const monthlyBody = document.querySelector("#pnl-monthly tbody");
     if (!data.monthly || !data.monthly.length) {
-      monthlyBody.innerHTML = '<tr><td colspan="7" class="empty">No closed trades in this date range.</td></tr>';
+      monthlyBody.innerHTML = '<tr><td colspan="9" class="empty">No closed trades in this date range.</td></tr>';
     } else {
-      monthlyBody.innerHTML = data.monthly.map((m) => `<tr>
-        <td>${m.month}</td>
-        <td class="right ${cls(m.realized_pnl)}">${fmtMoney(m.realized_pnl)}</td>
-        <td class="right">${fmtMoney(m.premium_captured)}</td>
-        <td class="right">${m.trade_count}</td>
-        <td class="right">${m.wins}</td>
-        <td class="right">${m.losses}</td>
-        <td class="right">${fmtPct(m.win_rate)}</td>
-      </tr>`).join("");
+      monthlyBody.innerHTML = data.monthly.map((m) => {
+        // m.brokerage_fee is always a number (0 means synced as zero);
+        // m.pending_fee_sync flags whether this month still has trades
+        // awaiting the broker's fee feed.
+        const fee = typeof m.brokerage_fee === "number" ? m.brokerage_fee : 0;
+        const netP = typeof m.net_pnl === "number" ? m.net_pnl : m.realized_pnl;
+        const pending = m.pending_fee_sync || 0;
+        const feeCell = pending
+          ? `<span title="${pending} trade(s) pending fee sync">${fmtMoney(fee)}*</span>`
+          : fmtMoney(fee);
+        return `<tr>
+          <td>${m.month}</td>
+          <td class="right ${cls(m.realized_pnl)}">${fmtMoney(m.realized_pnl)}</td>
+          <td class="right">${fmtMoney(m.premium_captured)}</td>
+          <td class="right">${m.trade_count}</td>
+          <td class="right">${m.wins}</td>
+          <td class="right">${m.losses}</td>
+          <td class="right">${fmtPct(m.win_rate)}</td>
+          <td class="right">${feeCell}</td>
+          <td class="right ${cls(netP)}"><strong>${fmtMoney(netP)}</strong></td>
+        </tr>`;
+      }).join("");
     }
 
     // Closed trades
@@ -134,10 +177,22 @@
     document.getElementById("pnl-trades-count").textContent = `(${trades.length})`;
     const tradesBody = document.querySelector("#pnl-trades tbody");
     if (!trades.length) {
-      tradesBody.innerHTML = '<tr><td colspan="10" class="empty">No closed trades in this date range.</td></tr>';
+      tradesBody.innerHTML = '<tr><td colspan="12" class="empty">No closed trades in this date range.</td></tr>';
     } else {
       tradesBody.innerHTML = trades.map((c) => {
         const p = parseFloat(c.realized_pnl || 0);
+        // brokerage_fee = null until the fees sync job has matched a
+        // broker activity/transaction row to this closure. Show "—"
+        // (with hover hint) so the user can tell pending from $0.
+        const hasFee = c.brokerage_fee != null;
+        const fee = hasFee ? parseFloat(c.brokerage_fee) : null;
+        const net = hasFee ? (p - fee) : null;
+        const feeCell = hasFee
+          ? fmtMoney(fee)
+          : '<span class="muted" title="Pending broker fee sync — usually within ~15 min of close. Recheck on next refresh.">—</span>';
+        const netCell = hasFee
+          ? `<strong class="${cls(net)}">${fmtMoney(net)}</strong>`
+          : '<span class="muted" title="Pending broker fee sync">—</span>';
         return `<tr>
           <td>${fmtET(c.closed_at)}</td>
           <td><code>${c.ticker || ""}</code></td>
@@ -148,6 +203,8 @@
           <td class="right">${fmtMoney(c.premium_collected)}</td>
           <td class="right">${fmtMoney(c.close_cost)}</td>
           <td class="right ${cls(p)}"><strong>${fmtMoney(p)}</strong></td>
+          <td class="right">${feeCell}</td>
+          <td class="right">${netCell}</td>
           <td>${c.closure_reason || ""}</td>
         </tr>`;
       }).join("");

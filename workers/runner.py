@@ -220,6 +220,32 @@ class MultiTenantRunner:
         sched.add_job(_optimizer_tick, "interval", minutes=1,
                       id="optimizer_agent", replace_existing=True)
 
+        # ---- Broker fee sync (every 15 min) ----------------------
+        # closed_contracts.brokerage_fee starts NULL when the closure
+        # is recorded. This job polls each active project's broker
+        # (/v2/account/activities on Alpaca, /v1/.../transactions on
+        # ETrade), matches each fee row to a pending closure, and
+        # stamps the column. The P&L report's Brokerage Fee + Net P&L
+        # columns read from there.
+        async def _fees_sync_tick():
+            try:
+                active = ProjectsRepo.list_active()
+            except Exception:
+                active = []
+            if not active:
+                return
+            from fees import sync_fees_for_project
+            for proj in active:
+                try:
+                    await asyncio.to_thread(
+                        sync_fees_for_project, proj.project_id)
+                except Exception as ex:
+                    logger.exception(
+                        "fees sync failed for %s: %s",
+                        proj.project_id, ex)
+        sched.add_job(_fees_sync_tick, "interval", minutes=15,
+                      id="fees_sync", replace_existing=True)
+
         # ---- Deep position reconciliation (twice daily) -----------
         # The 15-min light pass above only detects PRESENCE mismatches
         # (DB has it / broker doesn't, or vice versa). It does NOT catch

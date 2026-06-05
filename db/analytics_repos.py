@@ -70,7 +70,8 @@ class ClosedContractsRepo:
             " strategy_phase, opened_at, closed_at, days_held, strike_price,"
             " quantity, premium_collected, close_cost, realized_pnl,"
             " closure_reason, delta_at_entry, dte_at_entry,"
-            " underlying_at_entry, underlying_at_close, settings_snapshot "
+            " underlying_at_entry, underlying_at_close, settings_snapshot,"
+            " brokerage_fee, fee_synced_at "
             "FROM closed_contracts "
             f"WHERE {' AND '.join(where)} "
             "ORDER BY closed_at DESC "
@@ -84,20 +85,87 @@ class ClosedContractsRepo:
                 snap = json.loads(r[18]) if r[18] else None
             except Exception:
                 snap = None
+            fee = float(r[19]) if r[19] is not None else None
+            pnl = float(r[12])
+            # net_pnl carries the (fee-adjusted) figure if we have the
+            # fee, otherwise mirrors realized_pnl. A NULL brokerage_fee
+            # means "not yet synced from broker" — the UI shows "—".
+            net_pnl = round(pnl - fee, 4) if fee is not None else pnl
             out.append({
                 "closure_id": r[0], "contract_id": r[1], "ticker": r[2],
                 "option_symbol": r[3], "strategy_phase": r[4],
                 "opened_at": r[5], "closed_at": r[6], "days_held": r[7],
                 "strike_price": float(r[8]), "quantity": int(r[9]),
                 "premium_collected": float(r[10]), "close_cost": float(r[11]),
-                "realized_pnl": float(r[12]), "closure_reason": r[13],
+                "realized_pnl": pnl, "closure_reason": r[13],
                 "delta_at_entry": float(r[14]) if r[14] is not None else None,
                 "dte_at_entry": int(r[15]) if r[15] is not None else None,
                 "underlying_at_entry": float(r[16]) if r[16] is not None else None,
                 "underlying_at_close": float(r[17]) if r[17] is not None else None,
                 "settings_snapshot": snap,
+                "brokerage_fee": fee,
+                "fee_synced_at": r[20],
+                "net_pnl": net_pnl,
             })
         return out
+
+    @staticmethod
+    def set_fee(closure_id: int, fee: float) -> None:
+        """Set brokerage_fee for one closed contract and stamp the sync
+        time. Called by fees.sync after matching a broker fee row to
+        this closure."""
+        with session_scope() as s:
+            s.execute(text("""
+                UPDATE closed_contracts
+                SET brokerage_fee = :f,
+                    fee_synced_at = UTC_TIMESTAMP(6)
+                WHERE closure_id = :id
+            """), {"f": float(fee), "id": int(closure_id)})
+            s.commit()
+
+    @staticmethod
+    def list_pending_sync(project_id: str, *,
+                          older_than_minutes: int = 5,
+                          limit: int = 500) -> list[dict[str, Any]]:
+        """Return closed contracts whose brokerage_fee is still NULL
+        and whose closed_at is at least ``older_than_minutes`` old.
+        The lag protects against racing the fee sync against the
+        broker's own settlement — both Alpaca activities and ETrade
+        transactions take a few minutes to surface fee data after
+        the trade fills."""
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(
+            minutes=older_than_minutes)
+        sql = (
+            "SELECT closure_id, ticker, option_symbol, strategy_phase, "
+            " opened_at, closed_at, quantity, premium_collected, "
+            " close_cost, contract_id "
+            "FROM closed_contracts "
+            "WHERE project_id = :p "
+            "  AND brokerage_fee IS NULL "
+            "  AND closed_at <= :cutoff "
+            "ORDER BY closed_at ASC "
+            "LIMIT :lim"
+        )
+        with session_scope() as s:
+            rows = s.execute(text(sql), {
+                "p": project_id, "cutoff": cutoff, "lim": int(limit),
+            }).fetchall()
+        return [
+            {
+                "closure_id": r[0],
+                "ticker": r[1],
+                "option_symbol": r[2],
+                "strategy_phase": r[3],
+                "opened_at": r[4],
+                "closed_at": r[5],
+                "quantity": int(r[6]),
+                "premium_collected": float(r[7]),
+                "close_cost": float(r[8]),
+                "contract_id": r[9],
+            }
+            for r in rows
+        ]
 
     @staticmethod
     def realized_pnl_since(project_id: str, since: datetime) -> float:
