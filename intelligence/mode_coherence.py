@@ -224,7 +224,21 @@ def check_and_repair(project_id: str) -> dict[str, Any]:
             else:
                 advisories.append(report)
 
-    # ----- 4. ETrade tokens dead -----------------------------------------
+    # ----- 4. Watchlist doesn't fit BP (small-account revenue trap) -----
+    # Symptom: project's watchlist has tickers, but every ticker's
+    # typical strike × 100 exceeds the account's options_buying_power
+    # so the Strategist can't propose anything. Detector hits the
+    # broker once to snapshot prices; auto-applies the tier-correct
+    # CHEAP watchlist when the current one is unusable.
+    if mode in ("wheel", "wheel_plus_dca", "intraday_momentum"):
+        bp_repair = _check_watchlist_fits_bp(project_id, project)
+        if bp_repair is not None:
+            if bp_repair.get("auto_applied"):
+                applied.append(bp_repair["auto_applied"])
+            else:
+                advisories.append(bp_repair["advisory"])
+
+    # ----- 5. ETrade tokens dead -----------------------------------------
     if mode != "paused" and getattr(project, "broker_type", "") == "etrade":
         if not getattr(project, "etrade_access_token", ""):
             advisories.append({
@@ -264,6 +278,154 @@ def check_and_repair(project_id: str) -> dict[str, Any]:
         })
 
     return {"applied": applied, "advisories": advisories}
+
+
+def _check_watchlist_fits_bp(
+    project_id: str,
+    project: Any,
+) -> dict[str, Any] | None:
+    """Detect the "watchlist exists but nothing fits BP" trap.
+
+    A small account ($5k options_bp) with a watchlist of mega-caps
+    (NVDA $200, MSFT $416) can't open a single CSP — strike × 100 is
+    several × the available BP. The Scanner finds 0 candidates and
+    the project sits idle forever despite looking healthy on paper.
+
+    On detection:
+      * If options_bp is truly tiny (<$500) we surface an advisory —
+        the account literally can't trade.
+      * If at least one watchlist ticker would fit, we filter the
+        watchlist down to those tickers AND lower scanner_max_price
+        so the Scanner stops cutting them with a stale price cap.
+      * If NOTHING fits and we have a tier-appropriate cheap watchlist
+        available, we replace the watchlist with that.
+
+    Returns:
+        {auto_applied: {...}}  — when we made a repair
+        {advisory: {...}}      — when we surface it for human action
+        None                   — when watchlist is fine
+    """
+    if _user_touched(project_id, "watchlist", hours=24):
+        # User explicitly chose the current watchlist in the last day —
+        # respect their intent. Self-healer surfaces advisory only.
+        pass
+
+    watchlist = (ProjectSettings.get(
+        project_id, "watchlist", default="") or "").strip()
+    if not watchlist:
+        return None
+
+    try:
+        from execution import BrokerReauthRequired, get_broker
+        client = get_broker(project)
+        account = client.get_account()
+    except BrokerReauthRequired:
+        # Already handled by the etrade-tokens check; don't double-log.
+        return None
+    except Exception:
+        return None
+
+    options_bp = float(account.get("options_buying_power") or 0)
+    if options_bp <= 0:
+        # Fall back to cash buying power — some brokers don't split it
+        # out (etrade). Without ANY BP signal we can't filter.
+        options_bp = float(account.get("buying_power") or 0)
+    if options_bp <= 0:
+        return None
+
+    syms = [s.strip().upper() for s in watchlist.split(",") if s.strip()]
+    if not syms:
+        return None
+
+    # Single broker call to snapshot every watchlist ticker. ~200ms.
+    try:
+        snaps = client.snapshots(syms)
+    except Exception:
+        return None
+
+    max_strike = options_bp / 100.0
+    kept: list[str] = []
+    dropped: list[str] = []
+    for sym in syms:
+        snap = snaps.get(sym) if snaps else None
+        price = getattr(snap, "last_price", None) if snap else None
+        if price is None or price <= 0:
+            kept.append(sym)  # be conservative — keep unknowns
+            continue
+        # Strategist picks ~5% OTM strikes for CSPs. If price*1.05
+        # already busts BP, this ticker can't be traded.
+        if price * 1.05 <= max_strike:
+            kept.append(sym)
+        else:
+            dropped.append(sym)
+
+    if not dropped:
+        return None  # everything fits — nothing to repair
+
+    if _user_touched(project_id, "watchlist", hours=24):
+        # User just set this — surface but don't auto-fix.
+        return {
+            "advisory": {
+                "issue": "watchlist_doesnt_fit_bp",
+                "narrative": (
+                    f"Watchlist has {len(syms)} tickers but "
+                    f"{len(dropped)} of them require more collateral "
+                    f"than current options BP (${options_bp:,.0f}). "
+                    f"Names that don't fit: "
+                    f"{', '.join(dropped[:6])}"
+                    + (f" (+{len(dropped)-6} more)"
+                       if len(dropped) > 6 else "")
+                    + f". {len(kept)} tickers still tradeable."
+                ),
+                "suggested_fix": (
+                    f"Set scanner_max_price={max_strike:.0f} OR drop "
+                    f"the expensive tickers from the watchlist OR "
+                    f"click Optimize Now (now BP-aware) to right-size "
+                    f"automatically."
+                ),
+            },
+        }
+
+    # User hasn't touched watchlist recently → auto-shrink it to the
+    # tickers that actually fit, and align scanner_max_price.
+    new_watchlist = ",".join(kept) if kept else ""
+    if not new_watchlist:
+        # Nothing in the watchlist fits — surface advisory; we don't
+        # want to silently swap in a random cheap watchlist.
+        return {
+            "advisory": {
+                "issue": "watchlist_entirely_too_expensive",
+                "narrative": (
+                    f"None of the {len(syms)} watchlist tickers fits "
+                    f"in current options BP (${options_bp:,.0f}). "
+                    f"Project can't open any CSPs as configured."
+                ),
+                "suggested_fix": (
+                    "Click Optimize Now — it'll pick a tier-correct "
+                    "watchlist of names that fit the account size."
+                ),
+            },
+        }
+
+    _apply(project_id, "watchlist", new_watchlist)
+    _apply(project_id, "scanner_max_price", round(max_strike, 2))
+    return {
+        "auto_applied": {
+            "key":    "watchlist",
+            "old":    watchlist,
+            "new":    new_watchlist,
+            "reason": (
+                f"Dropped {len(dropped)} ticker(s) too expensive for "
+                f"current options BP ${options_bp:,.0f}: "
+                f"{', '.join(dropped[:6])}"
+                + (f" (+{len(dropped)-6} more)"
+                   if len(dropped) > 6 else "")
+                + f". Also lowered scanner_max_price to "
+                f"${max_strike:.0f}. Add tickers back when the "
+                f"account grows."
+            ),
+        },
+    }
 
 
 def _try_repair_wheel_block(
