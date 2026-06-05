@@ -202,11 +202,24 @@ def run_for_project(project_id: str) -> dict[str, Any]:
     from intelligence.recommendations import (
         build_recommendations, apply_recommendation,
     )
+    # Pre-LLM step: deterministic mode-coherence self-healer. Catches
+    # the class of bug where the user picked a strategy_mode but the
+    # supporting toggles weren't flipped, OR where the wheel pipeline
+    # is in a Strategist→Guardrail no-fill loop. Runs every tick (cheap)
+    # so misconfigs get noticed within the optimizer cadence rather
+    # than waiting on the LLM to randomly suggest a fix.
+    try:
+        from intelligence.mode_coherence import check_and_repair
+        heal = check_and_repair(project_id)
+    except Exception:
+        logger.exception("mode_coherence check failed for %s", project_id)
+        heal = {"applied": [], "advisories": []}
 
     rec = build_recommendations(project_id)
     if "error" in rec:
         return {"project_id": project_id, "status": "no_recommendation",
-                "error": rec["error"]}
+                "error": rec["error"],
+                "self_heal": heal}
 
     rec_id = rec.get("rec_id")
     changes = rec.get("changes") or {}
@@ -216,7 +229,8 @@ def run_for_project(project_id: str) -> dict[str, Any]:
     if not auto_apply:
         return {"project_id": project_id, "status": "rec_built",
                 "rec_id": rec_id, "title": rec.get("title"),
-                "changes": changes, "auto_apply": False}
+                "changes": changes, "auto_apply": False,
+                "self_heal": heal}
 
     # Step-size cap is plan-aware: conservative plans only allow tiny
     # nudges, aggressive plans allow larger reactions. The plan itself
@@ -250,7 +264,8 @@ def run_for_project(project_id: str) -> dict[str, Any]:
             ],
         })
         return {"project_id": project_id, "status": "blocked_by_rails",
-                "rec_id": rec_id, "rejections": rejections}
+                "rec_id": rec_id, "rejections": rejections,
+                "self_heal": heal}
 
     # Persist via the recommendations module's apply_recommendation,
     # which handles the actual ProjectSettings.set + status update.
