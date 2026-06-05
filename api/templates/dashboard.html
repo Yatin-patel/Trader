@@ -16,7 +16,8 @@
         <th>Name</th>
         <th>Endpoint</th>
         <th>Allocation</th>
-        <th class="right" title="Today's gain/loss = current equity − prior close equity. Updated by the broker in real-time on Alpaca; closed-trades realized P/L fallback on other brokers.">Today P/L</th>
+        <th class="right" title="Sum of realized_pnl on contracts closed since UTC midnight today.">Today Realized</th>
+        <th class="right" title="Mark-to-market change on still-open positions today (= broker equity change − realized).">Today Unrealized</th>
         <th>Active</th>
         <th></th>
       </tr>
@@ -28,7 +29,8 @@
         <td>{{ p.project_name }}</td>
         <td><code>{{ p.alpaca_base_url }}</code></td>
         <td>${{ "%.2f"|format(p.max_equity_allocation) }}</td>
-        <td class="right today-pnl muted" data-loading>—</td>
+        <td class="right today-realized muted" data-loading>—</td>
+        <td class="right today-unrealized muted" data-loading>—</td>
         <td>{{ "Yes" if p.is_active else "No" }}</td>
         <td>
           <a class="btn small ghost" href="/projects/{{ p.project_id }}/performance">P&amp;L</a>
@@ -138,18 +140,10 @@
 </dialog>
 
 <script>
-// Today's Gain/Loss populator. Fetches /api/projects/{pid}/today_pnl
-// for each row asynchronously so the dashboard doesn't block on N
-// broker calls during page render. Updates the corresponding cell
-// when each request returns.
+// Today's Realized + Unrealized populator. Fetches
+// /api/projects/{pid}/today_pnl for each row asynchronously so the
+// dashboard doesn't block on N broker calls during page render.
 (function () {
-  const fmt = (n) => {
-    if (n === null || n === undefined || Number.isNaN(n)) return "—";
-    const sign = n > 0 ? "+" : "";
-    return sign + "$" + Math.abs(n).toLocaleString("en-US", {
-      minimumFractionDigits: 2, maximumFractionDigits: 2,
-    }) * (n < 0 ? -1 : 1);  // signed dollar string
-  };
   const fmtSigned = (n) => {
     if (n === null || n === undefined || Number.isNaN(n)) return "—";
     const sign = n > 0 ? "+" : n < 0 ? "-" : "";
@@ -157,39 +151,64 @@
       minimumFractionDigits: 2, maximumFractionDigits: 2,
     });
   };
+  const writeCell = (cell, n, baseCls) => {
+    if (n === null || n === undefined || Number.isNaN(n)) {
+      cell.textContent = "—";
+      cell.className = `${baseCls} muted`;
+      return;
+    }
+    cell.textContent = fmtSigned(n);
+    cell.className = `${baseCls} ${
+      n > 0 ? "pl-pos" : n < 0 ? "pl-neg" : "muted"}`;
+  };
   const rows = document.querySelectorAll(
     "#projects-table tbody tr[data-project-id]");
   rows.forEach((row) => {
     const pid = row.dataset.projectId;
-    const cell = row.querySelector(".today-pnl");
-    if (!cell) return;
+    const realCell = row.querySelector(".today-realized");
+    const unrealCell = row.querySelector(".today-unrealized");
+    if (!realCell || !unrealCell) return;
     fetch(`/api/projects/${encodeURIComponent(pid)}/today_pnl`)
       .then((r) => r.json())
       .then((d) => {
-        if (d.today_change === null || d.today_change === undefined) {
-          cell.textContent = d.source === "needs_reauth"
-            ? "reauth"
-            : "—";
-          cell.className = "right today-pnl muted";
+        if (d.source === "needs_reauth") {
+          realCell.textContent = "reauth";
+          unrealCell.textContent = "reauth";
+          realCell.className = "right today-realized muted";
+          unrealCell.className = "right today-unrealized muted";
           return;
         }
-        const change = parseFloat(d.today_change);
-        const pct = (d.today_pct !== null && d.today_pct !== undefined)
-          ? ` (${change >= 0 ? "+" : ""}${parseFloat(d.today_pct).toFixed(2)}%)`
-          : "";
-        cell.textContent = fmtSigned(change) + pct;
-        cell.className = "right today-pnl " + (
-          change > 0 ? "pl-pos" : change < 0 ? "pl-neg" : "muted");
+        writeCell(realCell,
+          d.today_realized !== undefined
+            ? parseFloat(d.today_realized) : null,
+          "right today-realized");
+        writeCell(unrealCell,
+          d.today_unrealized !== undefined && d.today_unrealized !== null
+            ? parseFloat(d.today_unrealized) : null,
+          "right today-unrealized");
+        // Hover tip on the unrealized cell shows the total day P&L
+        // for users who want the reconciled number.
+        if (d.today_change !== null && d.today_change !== undefined) {
+          const pct = (d.today_pct !== null && d.today_pct !== undefined)
+            ? ` (${parseFloat(d.today_pct).toFixed(2)}%)`
+            : "";
+          unrealCell.title = `Total day P/L: ${
+            fmtSigned(parseFloat(d.today_change))}${pct}`;
+        }
       })
       .catch(() => {
-        cell.textContent = "err";
-        cell.className = "right today-pnl muted";
+        realCell.textContent = "err";
+        unrealCell.textContent = "err";
+        realCell.className = "right today-realized muted";
+        unrealCell.className = "right today-unrealized muted";
       });
   });
 })();
 </script>
 <style>
-  .today-pnl { font-variant-numeric: tabular-nums; font-weight: 500; }
+  .today-realized, .today-unrealized {
+    font-variant-numeric: tabular-nums; font-weight: 500;
+  }
   .pl-pos { color: #16a34a; }
   .pl-neg { color: #dc2626; }
 </style>
