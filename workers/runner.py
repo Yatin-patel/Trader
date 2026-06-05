@@ -146,13 +146,16 @@ class MultiTenantRunner:
                 # so pick any active project's broker connection.
                 from workers.tenant_worker import _in_extended_hours_window
                 from db.repositories import ProjectsRepo as _PR
-                from execution import AlpacaClient
+                from execution import get_broker
                 active = _PR.list_active()
                 if not active:
                     return
+                # Pick any active project's broker to get a market
+                # calendar — calendar is global so the broker_type
+                # doesn't matter, just need *a* client.
                 in_window = await asyncio.to_thread(
                     _in_extended_hours_window,
-                    AlpacaClient(active[0]),
+                    get_broker(active[0]),
                 )
                 if not in_window:
                     logger.debug(
@@ -331,36 +334,26 @@ class MultiTenantRunner:
             logger.exception("reconcile failed: %s", e)
             return
 
-        # Phase-1 broker support: agents are still Alpaca-only. ETrade
-        # projects survive in the DB but skip the cycle loop until the
-        # full ETrade adapter ships in Phase 2.
-        alpaca_active: set[str] = set()
-        for p in all_active:
-            bt = (getattr(p, "broker_type", "alpaca") or "alpaca")
-            if bt == "alpaca":
-                alpaca_active.add(p.project_id)
-            else:
-                if not self._etrade_warned.get(p.project_id):
-                    logger.info(
-                        "skipping %s — broker_type=%s not yet supported by "
-                        "the runner (OAuth tokens present, agents pending)",
-                        p.project_id, bt,
-                    )
-                    self._etrade_warned[p.project_id] = True
+        # Phase 2: both Alpaca and ETrade projects route through the
+        # polymorphic get_broker() factory now, so the runner no longer
+        # discriminates by broker_type. ETrade projects with completed
+        # OAuth flow through the same TenantWorker.
+        active_pids: set[str] = {p.project_id for p in all_active}
 
         max_concurrent = int(AppSettings.get("max_concurrent_tenants", 8))
 
-        # Stop workers that are no longer active (or switched to ETrade).
+        # Stop workers whose project is no longer active.
         for pid in list(self._workers.keys()):
-            if pid not in alpaca_active:
+            if pid not in active_pids:
                 self._workers[pid].stop()
                 task = self._tasks.pop(pid, None)
                 if task:
                     task.cancel()
                 self._workers.pop(pid, None)
 
-        # Start workers for new active Alpaca projects, respecting concurrency.
-        for pid in alpaca_active:
+        # Start workers for new active projects (any broker), respecting
+        # concurrency.
+        for pid in active_pids:
             if pid in self._workers:
                 continue
             if len(self._workers) >= max_concurrent:

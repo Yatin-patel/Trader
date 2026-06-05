@@ -23,7 +23,7 @@ from sqlalchemy import text
 from db.connection import insert_returning_id, session_scope
 from db.repositories import ProjectsRepo
 from db.settings_store import ProjectSettings
-from execution import AlpacaClient
+from execution import get_broker
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ def run_backtest(project_id: str, *, from_date: date, to_date: date,
         return {"error": ("Backtest currently relies on Alpaca historical "
                           "data. Phase 2 will add ETrade + yfinance "
                           "fallbacks. Switch to an Alpaca project to backtest.")}
-    client = AlpacaClient(project)
+    client = get_broker(project)
 
     delta_lo = float(ProjectSettings.get(project_id, "csp_delta_min") or 0.15)
     delta_hi = float(ProjectSettings.get(project_id, "csp_delta_max") or 0.30)

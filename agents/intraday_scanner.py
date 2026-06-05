@@ -12,7 +12,7 @@ from typing import Any
 from analytics.intraday_signals import generate_intraday_signal, scan_intraday_opportunities
 from db.repositories import EventsRepo, ProjectsRepo
 from db.settings_store import ProjectSettings
-from execution import AlpacaClient
+from execution import get_broker
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def intraday_scan_node(state: dict[str, Any]) -> dict[str, Any]:
         return {"intraday_signals": []}
 
     # Check if market is open
-    client = AlpacaClient(project)
+    client = get_broker(project)
     if not client.is_market_open():
         logger.debug("Market closed, skipping intraday scan")
         return {"intraday_signals": []}
@@ -93,7 +93,7 @@ def evaluate_0dte_opportunity(
     if signal["strength"] < 0.7:
         return None
 
-    client = AlpacaClient(project)
+    client = get_broker(project)
 
     try:
         snap = client.snapshots([ticker]).get(ticker)

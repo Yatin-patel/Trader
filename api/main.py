@@ -2085,42 +2085,46 @@ def _build_snapshot(project_id: str, user_id: str | None = None,
     broker_type = (getattr(project, "broker_type", "alpaca") or "alpaca")
     broker_state = "ready"   # 'ready' | 'needs_oauth' | 'phase2_pending'
 
-    if broker_type == "etrade":
-        # ETrade Phase 1: tokens may be missing (user hasn't OAuthed yet)
-        # OR tokens may be present but the trading endpoints are still
-        # stubbed for Phase 2. Don't call Alpaca regardless.
-        if not getattr(project, "etrade_access_token", ""):
-            broker_state = "needs_oauth"
-            account["error"] = (
-                "ETrade is not yet connected. "
-                "Click 'Connect ETrade' to authorize."
-            )
-        else:
-            broker_state = "phase2_pending"
-            account["error"] = (
-                "ETrade is connected, but the trading endpoints land in "
-                "Phase 2. The runner is skipping this project for now."
-            )
-
+    # Use the polymorphic factory so the same code path serves Alpaca
+    # AND ETrade (Phase 2). ETradeClient lazy-resolves accountIdKey
+    # via /accounts/list if the project row's key is empty.
+    if broker_type == "etrade" and not getattr(
+            project, "etrade_access_token", ""):
+        # Distinct UI state for "OAuth not done yet" — surfaces the
+        # Connect button in the layout. Skip the broker call entirely.
+        broker_state = "needs_oauth"
+        account["error"] = (
+            "ETrade is not yet connected. "
+            "Click 'Connect ETrade' to authorize."
+        )
     else:
-        # Alpaca path (default).
         try:
-            ac = AlpacaClient(project)
+            from execution import get_broker
+            client = get_broker(project)
             try:
-                account.update(ac.get_account())
+                account.update(client.get_account())
+            except BrokerNotConfigured as e:
+                # Most common ETrade case: OAuth done but no
+                # accountIdKey could be resolved. UI surfaces a
+                # Reconnect button.
+                broker_state = "needs_oauth"
+                account["error"] = str(e)
             except Exception as e:
                 account["error"] = str(e)
             try:
-                clock.update(ac.get_market_clock())
+                clock.update(client.get_market_clock())
                 for k in ("next_open", "next_close", "timestamp"):
                     if clock.get(k) is not None:
                         clock[k] = str(clock[k])
             except Exception as e:
                 clock["error"] = str(e)
             try:
-                positions_live = ac.list_positions()
+                positions_live = client.list_positions()
             except Exception:
                 positions_live = []
+        except BrokerNotConfigured as e:
+            broker_state = "needs_oauth"
+            account["error"] = str(e)
         except Exception as e:
             account["error"] = str(e)
 
@@ -2203,26 +2207,25 @@ def _build_warnings(account: dict[str, Any], clock: dict[str, Any],
     broker_type = (getattr(project, "broker_type", "alpaca") or "alpaca")
 
     if account.get("error"):
-        if broker_type == "etrade":
-            if not getattr(project, "etrade_access_token", ""):
-                warns.append({
-                    "level": "info",
-                    "title": "ETrade not connected yet",
-                    "detail": "Complete the OAuth flow to authorize this "
-                              "project. Click the 'Connect ETrade' link.",
-                })
-            else:
-                warns.append({
-                    "level": "info",
-                    "title": "ETrade trading endpoints are in Phase 2",
-                    "detail": "OAuth tokens are stored, but live order "
-                              "submission ships in the next phase. The "
-                              "runner skips this project until then.",
-                })
+        if broker_type == "etrade" and not getattr(
+                project, "etrade_access_token", ""):
+            warns.append({
+                "level": "info",
+                "title": "ETrade not connected yet",
+                "detail": "Complete the OAuth flow to authorize this "
+                          "project. Click the 'Connect ETrade' link.",
+            })
         else:
-            warns.append({"level": "error",
-                          "title": "Alpaca account unreachable",
-                          "detail": account["error"]})
+            # Any other broker error path — show the actual error so the
+            # user knows whether it's a network blip, a credentials
+            # issue, or a real bug. Was hardcoding a stale "Phase 2"
+            # banner that no longer matches reality.
+            label = "ETrade" if broker_type == "etrade" else "Alpaca"
+            warns.append({
+                "level": "error",
+                "title": f"{label} account unreachable",
+                "detail": account["error"],
+            })
     elif broker_type == "alpaca":
         bp = account.get("buying_power") or 0
         cash = account.get("cash") or 0

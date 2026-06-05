@@ -12,7 +12,7 @@ from typing import Any
 
 from db.repositories import EventsRepo, PositionsRepo, ProjectsRepo, WheelRepo
 from db.settings_store import ProjectSettings
-from execution import AlpacaClient
+from execution import get_broker
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ def execute_orders_node(state: dict[str, Any]) -> dict[str, Any]:
     max_qty = max(1, int(ProjectSettings.get(project_id, "max_contracts_per_ticker")))
     csp_qty = min(csp_qty, max_qty)
 
-    client = AlpacaClient(project)
+    client = get_broker(project)
     results: list[dict[str, Any]] = []
 
     # Snapshot of strategy params at trade time — copied onto each

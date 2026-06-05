@@ -22,7 +22,7 @@ from analytics.iv_rank import get_iv_rank, passes_iv_filter
 from db.settings_store import ProjectSettings, effective_csp_band
 from risk.earnings import upcoming_earnings_within
 from risk.news import passes_news_filter
-from execution import AlpacaClient
+from execution import get_broker
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,7 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
     cc_hi = ProjectSettings.get(project_id, "cc_delta_max")
     max_contracts = ProjectSettings.get(project_id, "max_open_contracts")
 
-    client = AlpacaClient(project)
+    client = get_broker(project)
     live_positions = client.list_positions()
     equity_positions = {p["symbol"]: p for p in live_positions
                         if p["asset_class"] == "us_equity"}

@@ -14,7 +14,7 @@ from typing import Any
 
 from db.repositories import EventsRepo, ProjectsRepo
 from db.settings_store import ProjectSettings
-from execution import AlpacaClient
+from execution import get_broker
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ def scan_movers_node(state: dict[str, Any]) -> dict[str, Any]:
     min_pct = ProjectSettings.get(project_id, "scanner_min_pct_change")
     top_n = ProjectSettings.get(project_id, "scanner_top_n")
 
-    client = AlpacaClient(project)
+    client = get_broker(project)
     universe = _load_universe(project_id)
     try:
         snaps = client.snapshots(universe)

@@ -16,7 +16,7 @@ from typing import Any
 
 from db.repositories import EventsRepo, PositionsRepo, ProjectsRepo
 from db.settings_store import ProjectSettings
-from execution import AlpacaClient
+from execution import get_broker
 from risk.concentration import check_concentration_limit
 from risk.kill_switch import evaluate_kill_switches
 
@@ -38,7 +38,7 @@ def risk_guardrail_node(state: dict[str, Any]) -> dict[str, Any]:
             "selected_trades": [],
         }
 
-    client = AlpacaClient(project)
+    client = get_broker(project)
     stop_loss = float(ProjectSettings.get(project_id, "stop_loss_dollars"))
     max_collateral_pct = float(ProjectSettings.get(project_id, "max_collateral_pct"))
 

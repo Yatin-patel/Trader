@@ -278,16 +278,22 @@ def patched_alpaca(monkeypatch):
         holder["client"] = cached
         return cached
 
-    # Patch every module path through which AlpacaClient gets imported.
+    # Patch every module path through which AlpacaClient OR get_broker
+    # is imported. After the Phase 2 refactor agents call get_broker()
+    # to stay broker-agnostic, so the new symbol name is what matters.
+    # We continue to patch AlpacaClient too for modules in analytics/
+    # and risk/ that haven't been migrated yet.
     targets = [
         "execution",
         "agents.scanner", "agents.strategist",
         "agents.guardrail", "agents.executor",
-        "workers.tenant_worker",
+        "agents.intraday_scanner",
+        "workers.tenant_worker", "workers.runner",
         "analytics.closure_detector", "analytics.snapshotter",
         "analytics.iv_rank", "analytics.dividends",
         "analytics.intraday_signals",
         "risk.take_profit", "risk.auto_roll",
+        "backtest.runner",
     ]
     import importlib
     for mod_path in targets:
@@ -295,7 +301,8 @@ def patched_alpaca(monkeypatch):
             mod = importlib.import_module(mod_path)
         except ImportError:
             continue
-        if hasattr(mod, "AlpacaClient"):
-            monkeypatch.setattr(mod, "AlpacaClient", factory)
+        for sym in ("AlpacaClient", "get_broker"):
+            if hasattr(mod, sym):
+                monkeypatch.setattr(mod, sym, factory)
 
     return holder

@@ -32,7 +32,7 @@ except Exception:
 
 from db.repositories import EventsRepo, ProjectsRepo
 from db.settings_store import AppSettings, ProjectSettings
-from execution import AlpacaClient
+from execution import BrokerClient, get_broker
 from orchestration import build_graph
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ _CLOCK_TTL_SECONDS = 10.0
 _MAX_WAIT_SECONDS = 300
 
 
-def _get_cached_clock(client: AlpacaClient) -> dict[str, Any]:
+def _get_cached_clock(client: BrokerClient) -> dict[str, Any]:
     now = time.monotonic()
     if _CLOCK_CACHE["value"] is not None and (now - _CLOCK_CACHE["ts"]) < _CLOCK_TTL_SECONDS:
         return _CLOCK_CACHE["value"]
@@ -63,7 +63,7 @@ _CAL_CACHE: dict[str, tuple[float, set[str]]] = {}
 _CAL_TTL_SECONDS = 6 * 3600
 
 
-def _trading_days(client: AlpacaClient) -> set[str]:
+def _trading_days(client: BrokerClient) -> set[str]:
     """ISO-date strings (YYYY-MM-DD) for the next few trading sessions."""
     key = getattr(client.project, "alpaca_base_url", "") or "default"
     now = time.monotonic()
@@ -79,7 +79,7 @@ def _trading_days(client: AlpacaClient) -> set[str]:
     return days
 
 
-def _in_extended_hours_window(client: AlpacaClient) -> bool:
+def _in_extended_hours_window(client: BrokerClient) -> bool:
     """True if current US/Eastern time is in [04:00, 20:00) on a trading day.
 
     Returns False if zoneinfo is unavailable or the calendar lookup fails —
@@ -176,7 +176,7 @@ class TenantWorker:
         # ('wheel_plus_dca' just adds DCA on top — DCA runs from the
         # MultiTenantRunner scheduler, not from this per-tenant worker.)
 
-        client = AlpacaClient(project)
+        client = get_broker(project)
 
         # --- HARD GATE: market hours -----------------------------------------
         # Allow the cycle if either:
