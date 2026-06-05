@@ -353,32 +353,52 @@ def preview(project_id: str, strategy_id: str) -> dict[str, Any]:
     combined.update(_plan_overrides(trading_plan, tier))
     combined.update(_mode_overrides(strategy_mode, tier))
 
-    # Step 5: BP-fit the watchlist. Drop any ticker whose typical strike
-    # won't fit in the account's options_buying_power for a 1-contract
-    # CSP. This is the fix for the "watchlist exists but nothing
-    # trades" trap that was burning $5k accounts. We snapshot the
-    # candidates first to make the filter price-aware rather than
-    # using a static price table.
+    # Step 5: Dynamic watchlist. Replace the static tier-baseline with
+    # a market-aware refresh (today's top movers + IV-rich names +
+    # tier anchors, all BP-fit + earnings-filtered). Falls back to
+    # the static tier list when the broker can't be reached or the
+    # project explicitly disabled dynamic_watchlist_enabled.
     dropped_for_bp: list[str] = []
-    watchlist = combined.get("watchlist") or ""
-    if watchlist and options_bp > 0 and strategy_mode in (
-            "wheel", "wheel_plus_dca", "intraday_momentum"):
+    dropped_for_earnings: list[str] = []
+    momentum_added: list[str] = []
+    iv_rich_added: list[str] = []
+    if strategy_mode in ("wheel", "wheel_plus_dca",
+                          "intraday_momentum"):
         try:
-            from execution import get_broker as _gb
-            client = _gb(project)
-            syms = [s.strip().upper()
-                    for s in str(watchlist).split(",") if s.strip()]
-            snaps = client.snapshots(syms) if syms else {}
-            filtered, kept, dropped_for_bp = _filter_watchlist_by_bp(
-                watchlist, options_bp, snaps)
-            if kept:
-                combined["watchlist"] = filtered
-                # Also auto-set scanner_max_price so the runtime filter
-                # matches what we just BP-filtered.
-                combined["scanner_max_price"] = round(
-                    options_bp / 100.0, 2)
+            from watchlists import get_proposed_watchlist
+            proposal = get_proposed_watchlist(project_id)
+            if "error" not in proposal and proposal.get("final"):
+                combined["watchlist"] = ",".join(proposal["final"])
+                if options_bp > 0:
+                    combined["scanner_max_price"] = round(
+                        options_bp / 100.0, 2)
+                dropped_for_bp = proposal.get("dropped_for_bp", [])
+                dropped_for_earnings = proposal.get(
+                    "dropped_for_earnings", [])
+                momentum_added = proposal.get("momentum", [])
+                iv_rich_added = proposal.get("iv_rich", [])
         except Exception as e:
-            logger.warning("BP-fit watchlist filtering failed: %s", e)
+            logger.warning("dynamic watchlist build failed: %s — "
+                            "falling back to static tier list", e)
+            # Fall back to BP-filtering the static tier list.
+            watchlist = combined.get("watchlist") or ""
+            if watchlist and options_bp > 0:
+                try:
+                    from execution import get_broker as _gb
+                    client = _gb(project)
+                    syms = [s.strip().upper()
+                            for s in str(watchlist).split(",")
+                            if s.strip()]
+                    snaps = client.snapshots(syms) if syms else {}
+                    filtered, kept, dropped_for_bp = (
+                        _filter_watchlist_by_bp(
+                            watchlist, options_bp, snaps))
+                    if kept:
+                        combined["watchlist"] = filtered
+                        combined["scanner_max_price"] = round(
+                            options_bp / 100.0, 2)
+                except Exception:
+                    logger.exception("static BP filter also failed")
 
     notes = _tier_notes(tier, cash, bp, combined)
     if note:
@@ -390,6 +410,21 @@ def preview(project_id: str, strategy_id: str) -> dict[str, Any]:
         f"take-profit at {int((combined.get('close_at_profit_pct') or 0)*100)}% "
         f"of max."
     )
+    if momentum_added:
+        notes.append(
+            f"Dynamic watchlist added {len(momentum_added)} of "
+            f"today's top % movers (above static tier anchors): "
+            f"{', '.join(momentum_added[:8])}"
+            + (f" (+{len(momentum_added)-8} more)"
+               if len(momentum_added) > 8 else "")
+            + "."
+        )
+    if iv_rich_added:
+        notes.append(
+            f"Dynamic watchlist added {len(iv_rich_added)} IV-rich "
+            f"name(s) where premium is worth collecting: "
+            f"{', '.join(iv_rich_added)}."
+        )
     if dropped_for_bp:
         notes.append(
             f"Dropped {len(dropped_for_bp)} watchlist ticker(s) too "
@@ -398,6 +433,15 @@ def preview(project_id: str, strategy_id: str) -> dict[str, Any]:
             + (f" (+{len(dropped_for_bp)-8} more)"
                if len(dropped_for_bp) > 8 else "")
             + ". Add these back when the account grows."
+        )
+    if dropped_for_earnings:
+        notes.append(
+            f"Dropped {len(dropped_for_earnings)} ticker(s) with "
+            f"earnings within the avoid window: "
+            f"{', '.join(dropped_for_earnings[:6])}"
+            + (f" (+{len(dropped_for_earnings)-6} more)"
+               if len(dropped_for_earnings) > 6 else "")
+            + "."
         )
     if strategy_mode not in ("wheel", "wheel_plus_dca", "dca_only",
                              "paused", ""):

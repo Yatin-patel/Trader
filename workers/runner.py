@@ -246,6 +246,38 @@ class MultiTenantRunner:
         sched.add_job(_fees_sync_tick, "interval", minutes=15,
                       id="fees_sync", replace_existing=True)
 
+        # ---- Dynamic watchlist refresh (daily at market open) ------
+        # Replaces the static tier-baseline watchlists with a market-
+        # aware refresh: stable tier anchors + today's top % movers
+        # + IV-rich names, all BP-fit and earnings-filtered. Fires
+        # at 09:35 ET (5 min after open so today's snapshots have
+        # tradeable data). Each project can opt out via
+        # dynamic_watchlist_enabled.
+        async def _watchlist_refresh_tick():
+            try:
+                active = ProjectsRepo.list_active()
+            except Exception:
+                active = []
+            if not active:
+                return
+            from watchlists import refresh_watchlist
+            for proj in active:
+                try:
+                    res = await asyncio.to_thread(
+                        refresh_watchlist, proj.project_id)
+                    if res.get("status") == "refreshed":
+                        logger.info(
+                            "dynamic watchlist refreshed %s: %d names",
+                            proj.project_id, res.get("count"))
+                except Exception as ex:
+                    logger.exception(
+                        "watchlist refresh failed for %s: %s",
+                        proj.project_id, ex)
+        sched.add_job(
+            _watchlist_refresh_tick, "cron",
+            hour=13, minute=35, timezone=timezone.utc,
+            id="dynamic_watchlist", replace_existing=True)
+
         # ---- Deep position reconciliation (twice daily) -----------
         # The 15-min light pass above only detects PRESENCE mismatches
         # (DB has it / broker doesn't, or vice versa). It does NOT catch

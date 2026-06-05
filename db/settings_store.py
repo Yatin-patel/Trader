@@ -239,6 +239,10 @@ class ProjectSettings:
         "allow_0dte":                    (False,   "bool",   "Allow the day-trading strategist to buy 0DTE (same-day expiration) long calls/puts. HIGH variance — gamma is large, slippage is large, theta is brutal. Default off; opt in explicitly."),
         "allow_1dte":                    (False,   "bool",   "Allow the day-trading strategist to buy 1DTE (expires next trading day) long calls/puts. Lower variance than 0DTE but still day-trade territory. Default off."),
         "intraday_max_trades_per_cycle": (3,       "int",    "Hard cap on how many 0DTE/1DTE trades the strategist will open per cycle. Independent of the PDT 5-day window cap."),
+        # --- Dynamic watchlist (market-aware refresh) -------------------
+        "dynamic_watchlist_enabled":     (True,    "bool",   "When true, the watchlist auto-refreshes daily at US market open: stable tier-anchor names + today's top % movers + IV-rich names, all BP-fit and earnings-filtered. Set false to lock the watchlist to whatever you set manually."),
+        "dynamic_watchlist_max_size":    (30,      "int",    "Cap on dynamic-watchlist size after all augmentation. Smaller = focused universe; larger = more candidates per scan."),
+        "dynamic_watchlist_min_iv_rank": (0.30,    "float",  "Minimum IV-rank a momentum candidate must clear to be added to the watchlist's IV-rich augmentation layer. Lower = more inclusion."),
         "0dte_profit_target_pct":        (0.30,    "float",  "Per-trade profit target for 0DTE/1DTE long-option opens, as a fraction of entry price. 0.30 = exit when the option is up 30% from entry. Take-profit logic uses this to auto-close intraday winners."),
         "0dte_stop_loss_pct":            (0.50,    "float",  "Per-trade stop-loss for 0DTE/1DTE long-option opens, as a fraction of entry price. 0.50 = exit when the option is down 50% from entry."),
         "intraday_rsi_oversold":         (30,      "int",    "RSI threshold below which the intraday scanner flags an oversold (BUY-signal) condition. Lower = stricter, fewer but stronger signals. 14-period RSI; 30 is the textbook default."),
