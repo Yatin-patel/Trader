@@ -405,13 +405,22 @@ class ProjectSettings:
     @classmethod
     def group_for_display(
         cls,
-        settings: list[dict[str, Any]],
+        settings: list[Any],
     ) -> list[dict[str, Any]]:
         """Bucket a flat list of project settings into display groups
         (in order). Settings whose key isn't in any group land in a
         catch-all "Misc" group at the bottom — surfaces new settings
-        the moment they exist rather than silently hiding them."""
-        by_key = {row["key"]: row for row in settings}
+        the moment they exist rather than silently hiding them.
+
+        Accepts either dataclass-like SettingRow instances (what
+        list_for_project returns) OR plain dicts (used in tests). Uses
+        attribute access with a dict-fallback so both shapes work."""
+
+        def _k(row: Any) -> str:
+            return (row["key"] if isinstance(row, dict)
+                    else getattr(row, "key", ""))
+
+        by_key = {_k(row): row for row in settings}
         out: list[dict[str, Any]] = []
         used: set[str] = set()
         for group in cls.DISPLAY_GROUPS:
@@ -429,7 +438,7 @@ class ProjectSettings:
                     "subtitle": group.get("subtitle", ""),
                     "items":    items,
                 })
-        leftover = [r for r in settings if r["key"] not in used]
+        leftover = [r for r in settings if _k(r) not in used]
         if leftover:
             out.append({
                 "id":       "misc",
