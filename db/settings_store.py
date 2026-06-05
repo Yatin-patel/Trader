@@ -250,6 +250,171 @@ class ProjectSettings:
         "intraday_rsi_overbought":       (70,      "int",    "RSI threshold above which the scanner flags an overbought (SELL-signal) condition. Mirrors intraday_rsi_oversold."),
     }
 
+    # Display grouping for the project settings panel. Each group has a
+    # title, optional subtitle, and ORDERED list of setting keys it owns.
+    # Keys not listed in any group fall through to a "Misc" group at
+    # the bottom of the panel, so adding a new setting still renders
+    # (just in the catch-all bucket until someone moves it).
+    DISPLAY_GROUPS: list[dict[str, Any]] = [
+        {
+            "id":    "strategy",
+            "title": "Strategy & Mode",
+            "subtitle": "What this project trades and how it makes decisions.",
+            "keys": [
+                "strategy_mode", "trading_plan", "income_cadence",
+                "dry_run",
+            ],
+        },
+        {
+            "id":    "watchlist",
+            "title": "Scanner & Watchlist",
+            "subtitle": "Universe of tickers + how the scanner picks candidates.",
+            "keys": [
+                "watchlist", "quarantined_symbols",
+                "scanner_top_n", "scanner_min_price",
+                "scanner_max_price", "scanner_min_pct_change",
+                "volume_threshold",
+                "dynamic_watchlist_enabled",
+                "dynamic_watchlist_max_size",
+                "dynamic_watchlist_min_iv_rank",
+                "news_aware_watchlist",
+            ],
+        },
+        {
+            "id":    "wheel",
+            "title": "Wheel (Cash-Secured Puts + Covered Calls)",
+            "subtitle": "Used when strategy_mode is wheel or wheel_plus_dca.",
+            "keys": [
+                "csp_delta_min", "csp_delta_max",
+                "csp_min_dte", "csp_max_dte",
+                "cc_delta_min", "cc_delta_max",
+                "cc_min_premium_ratio",
+                "contracts_per_csp", "max_contracts_per_ticker",
+                "cc_pyramid_levels", "cc_pyramid_spacing_pct",
+            ],
+        },
+        {
+            "id":    "spreads",
+            "title": "Multi-leg Spreads",
+            "subtitle": "Verticals, iron condor, calendar — used when strategy_mode is one of the *_spread modes.",
+            "keys": [
+                "spread_target_delta", "spread_width",
+                "spread_min_dte", "spread_max_dte",
+                "calendar_option_type",
+                "calendar_short_dte", "calendar_long_dte",
+            ],
+        },
+        {
+            "id":    "intraday",
+            "title": "Day-Trading / Intraday Momentum",
+            "subtitle": "Used when strategy_mode is intraday_momentum. PDT rules enforced automatically.",
+            "keys": [
+                "intraday_scanner_enabled",
+                "allow_0dte", "allow_1dte",
+                "intraday_max_trades_per_cycle",
+                "0dte_profit_target_pct", "0dte_stop_loss_pct",
+                "intraday_rsi_oversold", "intraday_rsi_overbought",
+            ],
+        },
+        {
+            "id":    "risk",
+            "title": "Risk & Position Caps",
+            "subtitle": "Hard limits on capital exposure, concentration, and recovery from errors.",
+            "keys": [
+                "max_open_positions", "max_open_contracts",
+                "max_collateral_pct",
+                "max_concentration_per_ticker",
+                "stop_loss_dollars",
+                "min_iv_rank",
+                "avoid_earnings_within_dte",
+                "recent_failure_skip_minutes",
+            ],
+        },
+        {
+            "id":    "exit",
+            "title": "Take-Profit & Auto-Roll",
+            "subtitle": "How and when open positions close themselves.",
+            "keys": [
+                "take_profit_enabled", "close_at_profit_pct",
+                "auto_roll_enabled", "auto_roll_dte_threshold",
+            ],
+        },
+        {
+            "id":    "news",
+            "title": "News & Sentiment Filters",
+            "subtitle": "Per-ticker filters using Alpaca News + VADER scoring.",
+            "keys": [
+                "news_sentiment_filter", "news_sentiment_min",
+            ],
+        },
+        {
+            "id":    "macro",
+            "title": "Economic Event Gates",
+            "subtitle": "Block new positions around binary-vol events like FOMC, CPI, NFP.",
+            "keys": [
+                "skip_event_days_within",
+                "skip_on_fomc_days", "skip_on_cpi_days",
+                "skip_on_nfp_days", "skip_on_pce_days",
+            ],
+        },
+        {
+            "id":    "optimizer",
+            "title": "Optimizer Agent",
+            "subtitle": "LLM-driven setting tuner that runs on its own cadence.",
+            "keys": [
+                "optimizer_auto_apply", "optimizer_interval_minutes",
+            ],
+        },
+        {
+            "id":    "execution",
+            "title": "Cycle & Execution",
+            "subtitle": "Scheduling, order routing, and broker behavior.",
+            "keys": [
+                "loop_interval_seconds", "reconcile_interval_min",
+                "order_time_in_force", "use_extended_hours",
+            ],
+        },
+    ]
+
+    @classmethod
+    def group_for_display(
+        cls,
+        settings: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Bucket a flat list of project settings into display groups
+        (in order). Settings whose key isn't in any group land in a
+        catch-all "Misc" group at the bottom — surfaces new settings
+        the moment they exist rather than silently hiding them."""
+        by_key = {row["key"]: row for row in settings}
+        out: list[dict[str, Any]] = []
+        used: set[str] = set()
+        for group in cls.DISPLAY_GROUPS:
+            items = []
+            for key in group["keys"]:
+                row = by_key.get(key)
+                if row is None:
+                    continue
+                items.append(row)
+                used.add(key)
+            if items:
+                out.append({
+                    "id":       group["id"],
+                    "title":    group["title"],
+                    "subtitle": group.get("subtitle", ""),
+                    "items":    items,
+                })
+        leftover = [r for r in settings if r["key"] not in used]
+        if leftover:
+            out.append({
+                "id":       "misc",
+                "title":    "Other Settings",
+                "subtitle": ("Newer or less-categorized settings — "
+                             "these still work, they just don't have "
+                             "a home group yet."),
+                "items":    leftover,
+            })
+        return out
+
     @classmethod
     def get(cls, project_id: str, key: str, default: Any = None) -> Any:
         with session_scope() as s:

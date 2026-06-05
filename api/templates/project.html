@@ -238,7 +238,7 @@
       'balanced':     'Default — middle ground. Optimizer can step up to 50% per cycle and picks changes with the best Sharpe / Sortino tradeoff.',
       'aggressive':   'Higher delta, shorter DTE, looser risk caps. Optimizer can step up to 75% per cycle and pushes for premium / activity. Use with care on small accounts.'
     } %}
-    {% for s in project_settings %}
+    {% macro render_setting(s) %}
     <div class="setting-row" data-key="{{ s.key }}" data-type="{{ s.value_type }}">
       <div class="setting-meta">
         <code>{{ s.key }}</code>
@@ -276,7 +276,31 @@
       <!-- Inline help text — updates when an enum/bool value changes. -->
       <div class="setting-help muted" data-help></div>
     </div>
-    {% endfor %}
+    {% endmacro %}
+
+    {% if project_setting_groups %}
+      {% for group in project_setting_groups %}
+      <details class="setting-group" id="settings-group-{{ group.id }}"
+               {% if loop.index <= 3 %}open{% endif %}>
+        <summary class="setting-group-head">
+          <span class="setting-group-title">{{ group.title }}</span>
+          <span class="setting-group-count muted">
+            {{ group['items'] | length }} settings
+          </span>
+        </summary>
+        {% if group.subtitle %}
+        <p class="setting-group-subtitle muted">{{ group.subtitle }}</p>
+        {% endif %}
+        {% for s in group['items'] %}
+          {{ render_setting(s) }}
+        {% endfor %}
+      </details>
+      {% endfor %}
+    {% else %}
+      {% for s in project_settings %}
+        {{ render_setting(s) }}
+      {% endfor %}
+    {% endif %}
   </form>
 </section>
 
@@ -293,6 +317,55 @@
   }
   .setting-help:empty { display: none; }
   .setting-help::before { content: '↳ '; opacity: 0.6; }
+
+  /* Collapsible setting groups. Each group is a <details> so the
+     panel is browsable without scrolling 200 rows; the first 3
+     groups open by default so the most-used settings are visible. */
+  .setting-group {
+    border: 1px solid var(--border, #e5e7eb);
+    border-radius: var(--radius-md, 8px);
+    margin: 8px 4px;
+    padding: 0 12px;
+    background: var(--panel-bg-subtle, rgba(0,0,0,0.01));
+  }
+  .setting-group[open] {
+    background: transparent;
+  }
+  .setting-group-head {
+    list-style: none;
+    cursor: pointer;
+    padding: 10px 4px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    font-weight: 600;
+    user-select: none;
+  }
+  .setting-group-head::-webkit-details-marker { display: none; }
+  .setting-group-head::before {
+    content: '▸';
+    display: inline-block;
+    margin-right: 8px;
+    transition: transform 0.15s;
+    opacity: 0.6;
+  }
+  .setting-group[open] .setting-group-head::before {
+    transform: rotate(90deg);
+  }
+  .setting-group-title {
+    flex: 1;
+    font-size: 1em;
+  }
+  .setting-group-count {
+    font-size: 0.85em;
+    font-weight: 400;
+  }
+  .setting-group-subtitle {
+    font-size: 0.85em;
+    margin: 0 0 8px 28px;
+    line-height: 1.4;
+  }
 </style>
 
 <script>

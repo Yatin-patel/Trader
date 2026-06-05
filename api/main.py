@@ -1173,10 +1173,15 @@ async def settings_page(request: Request):
 async def project_page(request: Request, project_id: str):
     project = _scoped_project(project_id, request)
     proj_settings = ProjectSettings.list_for_project(project_id)
+    # Bucket flat settings into display groups (Strategy & Mode,
+    # Scanner & Watchlist, Wheel, Spreads, Day-Trading, Risk, etc.)
+    # so the panel reads top-to-bottom instead of alphabetically.
+    proj_setting_groups = ProjectSettings.group_for_display(proj_settings)
     return templates.TemplateResponse("project.html", {
         "request": request,
         "project": project,
         "project_settings": proj_settings,
+        "project_setting_groups": proj_setting_groups,
     })
 
 
