@@ -268,6 +268,60 @@ class TenantWorker:
             })
             return max(wait, 30)  # never check more often than every 30s when closed
 
+        # --- PRE-MARKET / AFTER-HOURS options gate ---------------------------
+        # Alpaca QUEUES options orders submitted outside RTH instead of
+        # rejecting them — they sit PENDING_NEW until 9:30 ET. Without a
+        # gate, a wheel project cycling every 60s for 5.5h of pre-market
+        # would stack 1,650-3,300 queued open orders on the same handful
+        # of tickers. They'd all try to fill at the open simultaneously.
+        # Disastrous.
+        #
+        # When we're cycle-active only because of extended_hours (not RTH),
+        # SKIP the strategy graph for options-only modes. Defenses (stop-
+        # loss, defensive_roll, take-profit) still run because their
+        # GTC close orders queued in pre-market will fill at 9:30 — which
+        # is exactly what we want when a position needs to close.
+        options_only_modes = {
+            "wheel", "wheel_plus_dca",
+            "bull_put_spread", "bear_call_spread",
+            "bull_call_spread", "bear_put_spread",
+            "iron_condor", "calendar_spread",
+            "intraday_momentum",
+        }
+        if not rth_open and ext_open and mode in options_only_modes:
+            EventsRepo.log(self.project_id, "Worker", "LOOP", {
+                "skipped": "pre_market_options_gate",
+                "mode": mode,
+                "narrative": [
+                    "Pre-market / after-hours: skipping the strategy "
+                    "graph (Scanner → Strategist → Guardrail → "
+                    "Executor) because Alpaca queues option orders "
+                    "outside RTH instead of executing them. Defenses "
+                    "(stop-loss + take-profit + defensive_roll) still "
+                    "run — their GTC closes queued now will fill at "
+                    "9:30 ET open.",
+                ],
+            })
+            # Still run defenses so a position past the stop gets its
+            # close-order queued for the open.
+            try:
+                from risk.option_stop_loss import evaluate_stop_loss
+                from risk.defensive_roll import evaluate_defensive_roll
+                from risk.take_profit import evaluate_take_profit
+                from risk.auto_roll import evaluate_auto_roll
+                await asyncio.to_thread(
+                    evaluate_stop_loss, self.project_id)
+                await asyncio.to_thread(
+                    evaluate_defensive_roll, self.project_id)
+                await asyncio.to_thread(
+                    evaluate_take_profit, self.project_id)
+                await asyncio.to_thread(
+                    evaluate_auto_roll, self.project_id)
+            except Exception as e:
+                logger.exception(
+                    "pre-market defenses crashed: %s", e)
+            return self._cycle_interval()
+
         # --- Market is open: run a full cycle --------------------------------
         self._cycle_count += 1
         initial: dict[str, Any] = {
