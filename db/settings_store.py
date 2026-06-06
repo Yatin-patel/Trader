@@ -258,6 +258,10 @@ class ProjectSettings:
         "defensive_roll_max_dte":        (14,      "int",    "Only roll positions with DTE ≤ this. Past this window, theta isn't worth the gamma any more."),
         "defensive_roll_target_dte":     (30,      "int",    "Roll out to ~this many days. Picks the new strike near defensive_roll_strike_offset_pct OTM."),
         "defensive_roll_strike_offset_pct": (0.05, "float",  "How much OTM to roll the strike to, as a fraction of current underlying price (e.g. 0.05 = roll a tested put down to 5% below spot)."),
+        # --- Live-trading hardening (Tier 1 of live-readiness) -----------
+        "stale_close_max_age_seconds":   (300,    "int",    "Cancel any buy-to-close option order older than this number of seconds at the start of each defense cycle. Was the 'why are there 50 stuck WFC close orders' fix — without this, a stop-loss bid at MID that doesn't fill blocks all future stops on the same symbol forever (via the order_guard de-dup), so the position has no active protection. 300s = 5 min default; lower for fast markets."),
+        "defensive_close_tif":           ("gtc",  "string", "Time-in-force used by stop-loss + defensive-roll BUY-TO-CLOSE orders. 'gtc' = good-till-cancelled (survives 4pm close), 'day' = expires at 4pm ET. GTC is strongly recommended for live — a day-order submitted at 3:55pm Friday that doesn't fill leaves the position exposed all weekend."),
+        "defensive_close_aggressive_pricing": (True, "bool", "When true, stop-loss + defensive-roll close orders bid at ASK × 1.02 (capped at ASK + $0.50) instead of MID. Crosses the spread to ensure fill — saving $0.05/contract on a $2x-credit losing position is not worth holding it another minute. When false, bids at MID (the old behavior, may not fill in wide-spread markets)."),
     }
 
     # Display grouping for the project settings panel. Each group has a
@@ -354,6 +358,9 @@ class ProjectSettings:
                 "defensive_roll_max_dte",
                 "defensive_roll_target_dte",
                 "defensive_roll_strike_offset_pct",
+                "stale_close_max_age_seconds",
+                "defensive_close_tif",
+                "defensive_close_aggressive_pricing",
             ],
         },
         {

@@ -98,6 +98,7 @@ def detect_closures(project_id: str) -> dict[str, int]:
             if not held or float(held.get("qty") or 0) < (100 * quantity):
                 reason = "CALLED_AWAY"
 
+        closed_at_ts = _utcnow()
         ClosedContractsRepo.insert(
             project_id=project_id,
             contract_id=c.get("contract_id"),
@@ -105,7 +106,7 @@ def detect_closures(project_id: str) -> dict[str, int]:
             option_symbol=symbol,
             strategy_phase=c["strategy_phase"],
             opened_at=opened_at,
-            closed_at=_utcnow(),
+            closed_at=closed_at_ts,
             strike_price=strike,
             quantity=quantity,
             premium_collected=gross_premium,
@@ -115,6 +116,18 @@ def detect_closures(project_id: str) -> dict[str, int]:
             underlying_at_entry=c.get("underlying_at_entry"),
             settings_snapshot=c.get("settings_snapshot"),
         )
+        # PDT day-trade tracking: any same-day open+close counts
+        # against the FINRA 4-in-5-days cap on sub-$25k accounts.
+        try:
+            from risk.pdt_guard import log_same_day_closure
+            log_same_day_closure(
+                project_id=project_id,
+                symbol=symbol or ticker,
+                opened_at=opened_at,
+                closed_at=closed_at_ts,
+            )
+        except Exception:
+            logger.exception("PDT same-day log failed for %s", symbol)
 
         # Mark wheel_contracts.is_closed = 1
         with session_scope() as s:

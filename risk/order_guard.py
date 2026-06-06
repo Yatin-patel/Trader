@@ -119,3 +119,69 @@ def count_pending_for_symbol(
         except Exception:
             continue
     return n
+
+
+def sweep_stale_close_orders(
+    client: Any,
+    project_id: str,
+    max_age_seconds: int = 300,
+) -> int:
+    """Cancel any close-side order (BUY on an option = buy-to-close)
+    that's been sitting open longer than ``max_age_seconds``.
+
+    Why this exists: stop-loss / take-profit / defensive-roll all
+    submit at the mid price at the moment the cycle runs. In live
+    markets with wide bid/ask, that bid may not be hit. The order
+    sits open, the underlying keeps moving against us, but the
+    order_guard prevents resubmission — so the position effectively
+    has NO active close protection. This sweep cancels stale orders
+    so the next cycle resubmits at the CURRENT mid (and the new
+    aggressive-pricing path in stop-loss bids at ask × 1.02 to
+    actually fill).
+
+    Returns the number of orders cancelled."""
+    from datetime import datetime, timezone
+    now = datetime.now(tz=timezone.utc)
+    cancelled = 0
+    # Force a fresh fetch — we don't want to act on stale cache
+    reset_cache(project_id)
+    orders = _open_orders(client, project_id)
+    for o in orders:
+        try:
+            side = str(getattr(o, "side", "")).lower().replace(
+                "orderside.", "")
+            sym = str(getattr(o, "symbol", "")).upper()
+            # Treat 6+ char OCC option symbols. Skip equity orders.
+            if len(sym) < 12:
+                continue
+            # Only cancel BUY orders (buy-to-close on a short option).
+            # SELL orders are typically opens; don't cancel those.
+            if side != "buy":
+                continue
+            submitted_at = getattr(o, "submitted_at", None)
+            if submitted_at is None:
+                continue
+            if isinstance(submitted_at, str):
+                submitted_at = datetime.fromisoformat(
+                    submitted_at.replace("Z", "+00:00"))
+            if submitted_at.tzinfo is None:
+                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+            age = (now - submitted_at).total_seconds()
+            if age < max_age_seconds:
+                continue
+            try:
+                # alpaca-py API
+                client.trading.cancel_order_by_id(o.id)
+                cancelled += 1
+            except Exception:
+                logger.exception(
+                    "stale-order sweep cancel failed: %s",
+                    getattr(o, "id", "?"))
+        except Exception:
+            continue
+    if cancelled > 0:
+        reset_cache(project_id)
+        logger.info(
+            "stale-order sweep cancelled %d close(s) for %s "
+            "(age > %ds)", cancelled, project_id, max_age_seconds)
+    return cancelled

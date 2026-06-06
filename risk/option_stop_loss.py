@@ -92,13 +92,34 @@ def evaluate_stop_loss(project_id: str) -> list[dict[str, Any]]:
                        project_id, e)
         return []
 
+    # Sweep any stale buy-to-close orders before we re-evaluate.
+    # Without this, a previous stop fired at MID that sat unfilled
+    # would block this cycle (via order_guard) AND wouldn't fill
+    # because the underlying kept moving. Cancelling stale closes
+    # lets the new aggressive-pricing path resubmit at ASK × 1.02.
+    try:
+        from risk.order_guard import sweep_stale_close_orders
+        max_age = int(ProjectSettings.get(
+            project_id, "stale_close_max_age_seconds",
+            default=300) or 300)
+        sweep_stale_close_orders(client, project_id,
+                                 max_age_seconds=max_age)
+    except Exception:
+        logger.exception("stale-order sweep failed; continuing")
+
     open_contracts = WheelRepo.list_open(project_id)
     if not open_contracts:
         return []
 
     dry_run = bool(ProjectSettings.get(project_id, "dry_run"))
+    # Stop-loss closes prefer GTC so a buy-to-close submitted at 3:55pm
+    # doesn't die at 4pm and leave the position unprotected over a
+    # weekend. The operator can override per project.
     tif = str(ProjectSettings.get(
-        project_id, "order_time_in_force") or "day")
+        project_id, "defensive_close_tif", default="gtc") or "gtc")
+    aggressive = bool(ProjectSettings.get(
+        project_id, "defensive_close_aggressive_pricing",
+        default=True))
 
     # Group by underlying so we make one chain call per ticker.
     by_underlying: dict[str, list[dict[str, Any]]] = {}
@@ -160,13 +181,25 @@ def evaluate_stop_loss(project_id: str) -> list[dict[str, Any]]:
                 "stop_trigger_price": round(stop_price, 2),
                 "unrealized_loss": round(unrealized_loss, 2),
             }
+            # Aggressive pricing: when in stop-loss territory we WANT
+            # to fill. Saving $0.05/contract isn't worth holding a
+            # losing position another minute. Bid at ask × 1.02 so
+            # the order is marketable; falls back to mid when ask
+            # is unreasonably wide vs bid.
+            close_price = round(mid, 2)
+            if aggressive and ask > 0:
+                # Cap the cross at 5% above ask to avoid pathological
+                # bids on illiquid 1-strike-wide chains.
+                marketable = round(min(ask * 1.02, ask + 0.50), 2)
+                close_price = marketable
+            attempt["close_limit_price"] = close_price
             if dry_run:
                 attempt["status"] = "DRY_RUN"
             else:
                 try:
                     order = client.submit_limit_option(
                         option_symbol=sym, qty=qty, side="buy",
-                        limit_price=round(mid, 2),
+                        limit_price=close_price,
                         time_in_force=tif,
                     )
                     attempt["status"] = "SUBMITTED"

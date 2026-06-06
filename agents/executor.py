@@ -102,18 +102,18 @@ def execute_orders_node(state: dict[str, Any]) -> dict[str, Any]:
     # checks remain authoritative for everything else.
     pdt_blocked = False
     pdt_block_reason = ""
-    if any(
-        str(t.get("type") or "").upper() in _INTRADAY_TYPES
-        for t in trades
-    ):
-        try:
-            from risk.pdt_guard import pdt_can_trade
-            ok, reason = pdt_can_trade(project_id)
-            if not ok:
-                pdt_blocked = True
-                pdt_block_reason = reason
-        except Exception:
-            logger.exception("pdt guard check failed; allowing trade")
+    # PDT pre-flight on EVERY open type — wheel CSPs closed same day
+    # by take-profit are day trades too, not just intraday longs.
+    # The check exempts >=$25k accounts internally.
+    try:
+        from risk.pdt_guard import is_pdt_at_risk
+        risk_blocked, risk_reason = is_pdt_at_risk(
+            project_id, opening_now=True)
+        if risk_blocked:
+            pdt_blocked = True
+            pdt_block_reason = risk_reason
+    except Exception:
+        logger.exception("pdt guard check failed; allowing trade")
 
     # Daily-drawdown circuit breaker. When today's net P&L (realized +
     # unrealized) has crossed −max_daily_drawdown_pct of prior close

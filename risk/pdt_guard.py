@@ -54,6 +54,90 @@ def count_day_trades_5d(project_id: str) -> int:
     return int(row[0]) if row else 0
 
 
+def log_same_day_closure(
+    project_id: str,
+    symbol: str,
+    opened_at: Any,
+    closed_at: Any,
+) -> int | None:
+    """Insert a day_trade_log row IF the closure was same-day as the
+    open.
+
+    Why this exists: until today, the platform only counted intraday
+    long calls/puts as day trades. A wheel CSP opened at 9:30am and
+    closed at 11am by take-profit IS ALSO a day trade for PDT
+    purposes. On a sub-$25k account those silent day trades stack up
+    and the broker locks the account at the 4th one in a 5-day
+    window. This logs them properly so the pre-open PDT check sees
+    them.
+
+    Called from analytics.closure_detector for every detected
+    closure. Returns the trade_id on insert, None when not same-day.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    if opened_at is None or closed_at is None:
+        return None
+    if isinstance(opened_at, _dt) and opened_at.tzinfo is None:
+        opened_at = opened_at.replace(tzinfo=_tz.utc)
+    if isinstance(closed_at, _dt) and closed_at.tzinfo is None:
+        closed_at = closed_at.replace(tzinfo=_tz.utc)
+    try:
+        if opened_at.date() != closed_at.date():
+            return None
+    except Exception:
+        return None
+    # Use the closure timestamp as the trade_date so day_trade_log
+    # rolling-5-day query works.
+    return log_day_trade(
+        project_id=project_id,
+        symbol=symbol,
+        open_order_id="same_day_open_close",
+        close_order_id="auto_logged_by_closure_detector",
+        trade_date=closed_at,
+    )
+
+
+def is_pdt_at_risk(
+    project_id: str,
+    *,
+    opening_now: bool = False,
+) -> tuple[bool, str]:
+    """Return (blocked, reason) for any sub-$25k account when opening
+    a new position would risk hitting the 4th day-trade in 5 days.
+
+    Difference from ``pdt_can_trade``:
+      * checks count vs (MAX − safety_margin), not just MAX
+      * when ``opening_now=True``, treats the *potential* future
+        closure as a possible day-trade so we don't open a 3rd
+        wheel CSP when we've already done 2 today + 1 last week
+
+    Sub-$25k account = subject to FINRA PDT rules. >=$25k accounts
+    return (False, "exempt") immediately.
+    """
+    equity = get_account_equity(project_id)
+    if equity is None:
+        # Without an equity reference, err on the side of allowing.
+        return (False, "no equity reference; PDT check skipped")
+    if equity >= PDT_EQUITY_THRESHOLD:
+        return (False,
+                f"account ${equity:,.0f} ≥ "
+                f"${PDT_EQUITY_THRESHOLD:,.0f} (PDT exempt)")
+    n = count_day_trades_5d(project_id)
+    # Margin of safety: don't open a trade that COULD become the 4th
+    # day-trade. Treat 3-of-3 already-counted as the cliff.
+    if opening_now and n >= MAX_DAY_TRADES_5D - 1:
+        return (True,
+                f"PDT cliff: {n} day-trades in 5d (cap "
+                f"{MAX_DAY_TRADES_5D}); a same-day close on a new "
+                f"open would be the 4th. Skipping.")
+    if n >= MAX_DAY_TRADES_5D:
+        return (True,
+                f"PDT cap hit: {n} day-trades in 5d (cap "
+                f"{MAX_DAY_TRADES_5D}).")
+    return (False, f"{MAX_DAY_TRADES_5D - n} day-trades remaining "
+                   f"in 5d window")
+
+
 def log_day_trade(
     project_id: str,
     symbol: str,

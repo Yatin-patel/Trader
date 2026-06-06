@@ -152,8 +152,16 @@ def evaluate_defensive_roll(
         return []
 
     dry_run = bool(ProjectSettings.get(project_id, "dry_run"))
-    tif = str(ProjectSettings.get(
+    # Defensive close orders use GTC by default so they survive past
+    # 4pm if liquidity is thin. The new sell-to-open leg uses normal
+    # `order_time_in_force` since it's an opening trade.
+    open_tif = str(ProjectSettings.get(
         project_id, "order_time_in_force") or "day")
+    close_tif = str(ProjectSettings.get(
+        project_id, "defensive_close_tif", default="gtc") or "gtc")
+    aggressive = bool(ProjectSettings.get(
+        project_id, "defensive_close_aggressive_pricing",
+        default=True))
 
     actions: list[dict[str, Any]] = []
     today = date.today()
@@ -288,7 +296,7 @@ def evaluate_defensive_roll(
                     option_symbol=target["symbol"],
                     qty=qty, side="sell",
                     limit_price=round(new_credit_per, 2),
-                    time_in_force=tif,
+                    time_in_force=open_tif,
                 )
                 attempt["new_order"] = new_order
             except Exception as e:
@@ -301,11 +309,18 @@ def evaluate_defensive_roll(
 
             # Close the old. If THIS fails we have a doubled-up
             # position briefly — log loudly so the user can intervene.
+            # Aggressive pricing on the buy-to-close so we actually
+            # fill (no point rolling if the old leg sits open at a
+            # missed bid).
+            close_price = round(mid, 2)
+            if aggressive and ask > 0:
+                close_price = round(min(ask * 1.02, ask + 0.50), 2)
+            attempt["close_limit_price"] = close_price
             try:
                 close_order = client.submit_limit_option(
                     option_symbol=sym, qty=qty, side="buy",
-                    limit_price=round(mid, 2),
-                    time_in_force=tif,
+                    limit_price=close_price,
+                    time_in_force=close_tif,
                 )
                 attempt["close_order"] = close_order
                 attempt["status"] = "ROLLED"
