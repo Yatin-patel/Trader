@@ -239,6 +239,22 @@ def evaluate_defensive_roll(
             if net_credit <= 0:
                 continue  # not rolling into a loss
 
+            # Skip if either leg of this roll is already pending at
+            # the broker — prevents the duplicate-order pile-up that
+            # surfaced over the 2026-06-05 weekend (10 stacked
+            # buy-to-close orders for the same contract).
+            try:
+                from risk.order_guard import (
+                    has_pending_close_for_symbol)
+                if (has_pending_close_for_symbol(
+                        client, project_id, sym, "buy")
+                    or has_pending_close_for_symbol(
+                        client, project_id,
+                        target.get("symbol", ""), "sell")):
+                    continue
+            except Exception:
+                pass
+
             attempt: dict[str, Any] = {
                 "ticker":             c["ticker"],
                 "old_symbol":         sym,

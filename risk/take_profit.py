@@ -120,6 +120,17 @@ def evaluate_take_profit(project_id: str) -> list[dict[str, Any]]:
             allowed, retry_in = _backoff_check(project_id, sym)
             if not allowed:
                 continue
+            # Don't re-submit a take-profit close if one is already
+            # pending at the broker (was causing 10+ duplicates per
+            # symbol across a weekend's worth of stuck day-orders).
+            try:
+                from risk.order_guard import (
+                    has_pending_close_for_symbol)
+                if has_pending_close_for_symbol(
+                        client, project_id, sym, "buy"):
+                    continue
+            except Exception:
+                pass
 
             # Time to take profit.
             attempt = {

@@ -138,6 +138,16 @@ def evaluate_stop_loss(project_id: str) -> list[dict[str, Any]]:
                 continue
             if not _backoff_check(project_id, sym):
                 continue
+            # Don't double-submit if a buy-to-close on this exact
+            # symbol is already pending at the broker. Stuck day-orders
+            # over a weekend can otherwise pile up 10+ duplicates.
+            try:
+                from risk.order_guard import has_pending_close_for_symbol
+                if has_pending_close_for_symbol(
+                        client, project_id, sym, "buy"):
+                    continue
+            except Exception:
+                pass
 
             unrealized_loss = (mid - premium_open) * 100 * qty
             attempt: dict[str, Any] = {
