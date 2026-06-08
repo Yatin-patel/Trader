@@ -253,6 +253,55 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
                        {"skip_reason": "max_open_contracts reached", "open": len(open_contracts)})
         return {"selected_trades": []}
 
+    # ---- BP-AWARE STRIKE CEILING --------------------------------------
+    # Before picking any contract, compute the maximum strike that will
+    # fit under BOTH the per-ticker concentration cap AND remaining
+    # options buying power. Without this guard, the Strategist happily
+    # picks $352-strike GOOGL on a $100k account with $25k per-ticker
+    # cap, the Guardrail rejects every trade, and the project sits
+    # idle producing dead cycles. Was the root cause of "no trading
+    # despite Strategist firing" on Yatin-Minimum + Yatin-Test1 on
+    # 2026-06-08. Symptom in the activity feed: many SELECTION events
+    # but every Guardrail RISK row carries "rejected" + "concentration
+    # cap"/"collateral cap".
+    try:
+        contracts_per_csp = int(ProjectSettings.get(
+            project_id, "contracts_per_csp", default=1) or 1)
+    except Exception:
+        contracts_per_csp = 1
+    contracts_per_csp = max(1, contracts_per_csp)
+    try:
+        conc_pct = float(ProjectSettings.get(
+            project_id, "max_concentration_per_ticker",
+            default=0.25) or 0.25)
+    except Exception:
+        conc_pct = 0.25
+    try:
+        coll_pct = float(ProjectSettings.get(
+            project_id, "max_collateral_pct", default=0.95) or 0.95)
+    except Exception:
+        coll_pct = 0.95
+    budget = float(getattr(project, "max_equity_allocation", 0) or 0)
+    # Concentration cap in dollars (per ticker, across both new + open).
+    conc_cap_usd = conc_pct * budget if budget > 0 else 0.0
+    # max strike that fits the per-ticker cap with our configured
+    # contracts_per_csp (collateral = strike * 100 * qty).
+    max_strike_per_ticker = (
+        (conc_cap_usd / 100.0 / contracts_per_csp)
+        if conc_cap_usd > 0 else float("inf"))
+    # Pull live options buying power for the total-collateral budget.
+    try:
+        account = client.get_account()
+        live_options_bp = float(
+            account.get("options_buying_power") or 0)
+    except Exception:
+        live_options_bp = 0.0
+    bp_budget_total = live_options_bp * coll_pct
+    # Track running collateral consumed by trades selected this cycle
+    # so the Strategist stops once the budget is exhausted (instead of
+    # producing 7 candidates that the Guardrail will mostly reject).
+    bp_used_this_cycle = 0.0
+
     llm = _build_llm()
     trades: list[dict[str, Any]] = []
     rejections: list[dict[str, Any]] = []
@@ -399,7 +448,30 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
 
             if phase == "NONE":
                 min_strike = snap.last_price * 0.80
-                max_strike = snap.last_price * 1.02
+                # max_strike normally caps at 102% of underlying. ALSO
+                # cap at the BP-aware ceiling so we never consider a
+                # strike whose collateral would bust the per-ticker
+                # concentration cap. Picks that fail Guardrail are
+                # wasted Strategist cycles.
+                max_strike = min(snap.last_price * 1.02,
+                                 max_strike_per_ticker)
+                # If the cap is already below 80% of underlying, there
+                # are no fittable strikes at all → skip the ticker.
+                if max_strike <= min_strike:
+                    EventsRepo.log(project_id, "Strategist", "SELECTION", {
+                        "ticker": ticker, "kind": "CASH_SECURED_PUT",
+                        "underlying_price": snap.last_price,
+                        "outcome": "strike_above_concentration_cap",
+                        "narrative": [
+                            f"Skipping {ticker}: even the lowest "
+                            f"reasonable strike (${min_strike:.2f}) × 100 × "
+                            f"{contracts_per_csp} contracts would exceed "
+                            f"the per-ticker concentration cap "
+                            f"(${conc_cap_usd:,.0f}). Ticker is too "
+                            f"expensive for this account.",
+                        ],
+                    })
+                    continue
                 contracts = client.list_option_contracts(ticker, "put",
                                                          csp_min_dte, csp_max_dte,
                                                          min_strike=min_strike,
@@ -472,6 +544,33 @@ def analyze_wheel_node(state: dict[str, Any]) -> dict[str, Any]:
                 if not decision.get("approve"):
                     rejections.append({"ticker": ticker, "reason": decision.get("rationale", "LLM rejected")})
                     continue
+                # Running BP budget check: stop adding new CSPs once
+                # this cycle's selections would exhaust the configured
+                # max_collateral_pct of options_buying_power. Without
+                # this, the Strategist produces 5-7 candidates per
+                # cycle on a $5k account and the Guardrail rejects most
+                # of them for "collateral cap". Now we only emit what
+                # can fit.
+                trade_collateral = (
+                    float(chosen["strike"]) * 100.0 * contracts_per_csp)
+                if (bp_budget_total > 0
+                        and bp_used_this_cycle + trade_collateral
+                            > bp_budget_total):
+                    EventsRepo.log(project_id, "Strategist", "SELECTION", {
+                        "ticker": ticker, "kind": "CASH_SECURED_PUT",
+                        "underlying_price": snap.last_price,
+                        "outcome": "bp_budget_exhausted",
+                        "narrative": [
+                            f"Skipping {ticker}: this cycle's selected "
+                            f"trades already consumed "
+                            f"${bp_used_this_cycle:,.0f} of "
+                            f"${bp_budget_total:,.0f} BP budget. Adding "
+                            f"{ticker} (${trade_collateral:,.0f}) would "
+                            f"bust it.",
+                        ],
+                    })
+                    continue
+                bp_used_this_cycle += trade_collateral
                 trades.append({
                     "ticker": ticker,
                     "type": "CSP",
