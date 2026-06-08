@@ -131,6 +131,19 @@ def evaluate_auto_roll(project_id: str) -> list[dict[str, Any]]:
             continue
         mid = (bid + ask) / 2
         qty = int(c.get("quantity") or 1)
+        # Don't double-submit if a buy-to-close on this symbol is
+        # already pending. This was the bug behind the AutoRoll
+        # runaway: every cycle resubmitted a fresh close because the
+        # previous one sat unfilled, then Alpaca rejected each new
+        # one with "insufficient qty available". Same fix as the one
+        # in take_profit / stop_loss / defensive_roll.
+        try:
+            from risk.order_guard import has_pending_close_for_symbol
+            if has_pending_close_for_symbol(
+                    client, project_id, sym, "buy"):
+                continue
+        except Exception:
+            pass
         attempt = {
             "ticker": c["ticker"],
             "option_symbol": sym,

@@ -1125,7 +1125,44 @@ async def api_today_pnl(request: Request, project_id: str):
         last_equity = float(account.get("last_equity") or 0)
         if equity > 0 and last_equity > 0:
             total_change = equity - last_equity
-            unrealized = total_change - realized
+            # Real open-position P&L = sum of (premium_open - current_mid)
+            # × 100 × qty across every open short. This is the TRUTH the
+            # user wants. The earlier formula (total_change - realized)
+            # produced wildly misleading numbers like -$10,939 when
+            # realized = $11,284 from week-old positions closed today.
+            # That's not what most users mean by "unrealized today".
+            unrealized = 0.0
+            try:
+                from db.repositories import WheelRepo
+                from risk.greeks_agg import _extract_underlying
+                opens = WheelRepo.list_open(project_id)
+                by_u: dict[str, list[Any]] = {}
+                for c in opens:
+                    sym = c.get("option_symbol") or ""
+                    if sym:
+                        by_u.setdefault(
+                            _extract_underlying(sym), []).append(c)
+                for u, cs in by_u.items():
+                    try:
+                        chain = client.option_chain_quotes(u)
+                    except Exception:
+                        continue
+                    for c in cs:
+                        sym = c["option_symbol"]
+                        q = chain.get(sym) or {}
+                        bid = float(q.get("bid") or 0)
+                        ask = float(q.get("ask") or 0)
+                        if ask <= 0:
+                            continue
+                        mid = (bid + ask) / 2
+                        prem = float(c["premium_collected"])
+                        qty = int(c.get("quantity") or 1)
+                        unrealized += (prem - mid) * 100 * qty
+            except Exception as e:
+                logger.warning(
+                    "open-position unrealized calc failed: %s", e)
+                # Fall back to the misleading-but-non-crashing math
+                unrealized = total_change - realized
             pct = (total_change / last_equity * 100) if last_equity else None
             return {
                 "project_id":  project_id,
