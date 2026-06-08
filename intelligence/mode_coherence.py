@@ -224,7 +224,19 @@ def check_and_repair(project_id: str) -> dict[str, Any]:
             else:
                 advisories.append(report)
 
-    # ----- 4. Watchlist doesn't fit BP (small-account revenue trap) -----
+    # ----- 4. Scanner returns zero candidates loop (silent dead-cycle)
+    # Symptom: the Scanner has run N cycles in a row with passed_filters=0,
+    # AND there's a non-empty watchlist. Almost always volume_threshold or
+    # scanner_min_pct_change is too aggressive for the account's actual
+    # watchlist (e.g. 3M shares/day on a small-cap watchlist). Auto-relax
+    # the most likely culprit per cycle so trading resumes within ~5 min
+    # without operator intervention.
+    if mode in ("wheel", "wheel_plus_dca"):
+        scanner_repair = _check_scanner_zero_candidates(project_id)
+        if scanner_repair is not None:
+            applied.append(scanner_repair)
+
+    # ----- 5. Watchlist doesn't fit BP (small-account revenue trap) -----
     # Symptom: project's watchlist has tickers, but every ticker's
     # typical strike × 100 exceeds the account's options_buying_power
     # so the Strategist can't propose anything. Detector hits the
@@ -278,6 +290,112 @@ def check_and_repair(project_id: str) -> dict[str, Any]:
         })
 
     return {"applied": applied, "advisories": advisories}
+
+
+def _check_scanner_zero_candidates(
+    project_id: str,
+) -> dict[str, Any] | None:
+    """Detect 'Scanner returned 0 candidates for the last 5+ cycles
+    despite a non-empty watchlist' and auto-relax the most-restrictive
+    filter so trading resumes.
+
+    Why: on 2026-06-08 Yatin-Minimum sat idle for hours because
+    volume_threshold was 3M (mega-cap default) but the watchlist was
+    all small-caps trading 300-900k shares mid-day. The user noticed
+    the lost trading window and rightly objected that this should
+    work autonomously regardless of account size. This is that fix.
+
+    Auto-fix order (least disruptive first):
+      1. If volume_threshold > 500k and the rejections are dominated by
+         "volume X below threshold Y" → halve volume_threshold (capped
+         at 100k floor).
+      2. If scanner_min_pct_change > 0.5 and rejections include
+         "%-change below floor" → halve it (capped at 0.25 floor).
+      3. Otherwise advisory only.
+    """
+    try:
+        events = EventsRepo.recent(project_id, limit=80)
+    except Exception:
+        return None
+    # Look at last 5 SCAN events. Require all 5 to have passed_filters=0
+    # AND universe_size>0 (i.e. it scanned something, just rejected all).
+    scans = [e for e in events
+             if e.get("node_name") == "Scanner"
+             and e.get("event_type") == "SCAN"]
+    if len(scans) < 5:
+        return None
+    last_5 = scans[:5]
+    for s in last_5:
+        pl = s.get("payload") or {}
+        if pl.get("passed_filters") != 0:
+            return None
+        if (pl.get("universe_size") or 0) <= 0:
+            return None
+    # 5 consecutive dead scans. Diagnose the dominant rejection reason.
+    # Walk rejected_sample across the 5 scans and bucket.
+    vol_rej = 0
+    pct_rej = 0
+    other_rej = 0
+    for s in last_5:
+        pl = s.get("payload") or {}
+        for r in (pl.get("rejected_sample") or []):
+            reason = str(r.get("reason") or "").lower()
+            if "volume" in reason and "below threshold" in reason:
+                vol_rej += 1
+            elif "%-change" in reason or "pct" in reason:
+                pct_rej += 1
+            else:
+                other_rej += 1
+    # Volume threshold dominates → halve it.
+    if vol_rej >= max(pct_rej, other_rej):
+        try:
+            cur = int(ProjectSettings.get(
+                project_id, "volume_threshold", default=500_000)
+                or 500_000)
+        except Exception:
+            cur = 500_000
+        if cur > 100_000 and not _user_touched(
+                project_id, "volume_threshold", hours=24):
+            new = max(100_000, cur // 2)
+            if new < cur:
+                _apply(project_id, "volume_threshold", new)
+                return {
+                    "key":    "volume_threshold",
+                    "old":    cur,
+                    "new":    new,
+                    "reason": (
+                        f"Scanner returned 0 candidates for 5 cycles "
+                        f"despite a non-empty watchlist. Volume "
+                        f"rejections dominated ({vol_rej} of "
+                        f"{vol_rej+pct_rej+other_rej}). Halved "
+                        f"volume_threshold from {cur} to {new} so "
+                        f"the small-cap watchlist can actually pass."
+                    ),
+                }
+    # Pct-change dominates → halve it.
+    if pct_rej >= max(vol_rej, other_rej):
+        try:
+            cur_p = float(ProjectSettings.get(
+                project_id, "scanner_min_pct_change", default=1.5)
+                or 1.5)
+        except Exception:
+            cur_p = 1.5
+        if cur_p > 0.25 and not _user_touched(
+                project_id, "scanner_min_pct_change", hours=24):
+            new_p = max(0.25, cur_p / 2)
+            if new_p < cur_p:
+                _apply(project_id, "scanner_min_pct_change", new_p)
+                return {
+                    "key":    "scanner_min_pct_change",
+                    "old":    cur_p,
+                    "new":    new_p,
+                    "reason": (
+                        f"5 dead scans, %-change rejections dominated. "
+                        f"Halved scanner_min_pct_change from {cur_p} "
+                        f"to {new_p}."
+                    ),
+                }
+    return None
 
 
 def _check_watchlist_fits_bp(
