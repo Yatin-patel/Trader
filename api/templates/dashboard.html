@@ -143,7 +143,11 @@
 // Today's Realized + Unrealized populator. Fetches
 // /api/projects/{pid}/today_pnl for each row asynchronously so the
 // dashboard doesn't block on N broker calls during page render.
+// Refreshes every 10 seconds so the user sees live P&L on the
+// projects list without having to F5. Pauses while the tab is in
+// the background so we don't pound the broker for an inactive tab.
 (function () {
+  const REFRESH_MS = 10_000;
   const fmtSigned = (n) => {
     if (n === null || n === undefined || Number.isNaN(n)) return "—";
     const sign = n > 0 ? "+" : n < 0 ? "-" : "";
@@ -161,14 +165,16 @@
     cell.className = `${baseCls} ${
       n > 0 ? "pl-pos" : n < 0 ? "pl-neg" : "muted"}`;
   };
-  const rows = document.querySelectorAll(
-    "#projects-table tbody tr[data-project-id]");
-  rows.forEach((row) => {
+
+  function refreshOne(row) {
     const pid = row.dataset.projectId;
     const realCell = row.querySelector(".today-realized");
     const unrealCell = row.querySelector(".today-unrealized");
-    if (!realCell || !unrealCell) return;
-    fetch(`/api/projects/${encodeURIComponent(pid)}/today_pnl`)
+    if (!realCell || !unrealCell) return Promise.resolve();
+    return fetch(
+      `/api/projects/${encodeURIComponent(pid)}/today_pnl`,
+      { cache: "no-store" }
+    )
       .then((r) => r.json())
       .then((d) => {
         if (d.source === "needs_reauth") {
@@ -186,8 +192,6 @@
           d.today_unrealized !== undefined && d.today_unrealized !== null
             ? parseFloat(d.today_unrealized) : null,
           "right today-unrealized");
-        // Hover tip on the unrealized cell shows the total day P&L
-        // for users who want the reconciled number.
         if (d.today_change !== null && d.today_change !== undefined) {
           const pct = (d.today_pct !== null && d.today_pct !== undefined)
             ? ` (${parseFloat(d.today_pct).toFixed(2)}%)`
@@ -202,7 +206,42 @@
         realCell.className = "right today-realized muted";
         unrealCell.className = "right today-unrealized muted";
       });
+  }
+
+  function refreshAll() {
+    const rows = document.querySelectorAll(
+      "#projects-table tbody tr[data-project-id]");
+    rows.forEach(refreshOne);
+  }
+
+  // First fetch immediately, then poll on an interval. Pause while
+  // the tab is hidden (visibilitychange listener) so a backgrounded
+  // tab doesn't fire requests forever.
+  refreshAll();
+  let timer = setInterval(refreshAll, REFRESH_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      clearInterval(timer);
+      timer = null;
+    } else if (timer === null) {
+      refreshAll();
+      timer = setInterval(refreshAll, REFRESH_MS);
+    }
   });
+  // Small "live • 10s" indicator in the panel header so the user
+  // knows the cells refresh on their own (no F5 needed).
+  const panelHead = document.querySelector("section.panel header.panel-head");
+  if (panelHead) {
+    const badge = document.createElement("span");
+    badge.className = "muted";
+    badge.style.cssText = "font-size:12px; align-self:center; "
+      + "margin-left:auto; padding-right:12px;";
+    badge.title = "Today P/L cells refresh every 10 seconds while this tab is open.";
+    badge.textContent = "● live (10s)";
+    const btn = panelHead.querySelector("#add-project-btn");
+    if (btn) panelHead.insertBefore(badge, btn);
+    else panelHead.appendChild(badge);
+  }
 })();
 </script>
 <style>
