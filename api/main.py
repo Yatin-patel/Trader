@@ -1087,8 +1087,22 @@ async def dashboard(request: Request):
     })
 
 
+# Short-TTL cache for today_pnl. The dashboard polls this every 10s per
+# project; without a cache each poll triggers ~1 full Alpaca option-chain
+# fetch PER held underlying. Those calls are synchronous and heavy. We
+#   (a) declare this endpoint as a plain `def` (NOT `async def`) so FastAPI
+#       runs it in its threadpool and it can never block the event loop —
+#       a blocking broker call here previously starved uvicorn and took the
+#       whole site down while trading kept running, and
+#   (b) cache the computed result so concurrent pollers (multiple tabs ×
+#       multiple projects) collapse to one broker round-trip per TTL window.
+import time as _time
+_TODAY_PNL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_TODAY_PNL_TTL_SEC = 20.0
+
+
 @app.get("/api/projects/{project_id}/today_pnl")
-async def api_today_pnl(request: Request, project_id: str):
+def api_today_pnl(request: Request, project_id: str):
     """Today's gain/loss for a single project, BROKEN OUT into realized
     + unrealized so the dashboard can show both columns.
 
@@ -1101,6 +1115,10 @@ async def api_today_pnl(request: Request, project_id: str):
     realized component is computed; unrealized stays null.
     """
     project = _scoped_project(project_id, request)
+
+    cached = _TODAY_PNL_CACHE.get(project_id)
+    if cached is not None and (_time.monotonic() - cached[0]) < _TODAY_PNL_TTL_SEC:
+        return cached[1]
 
     # Realized component is always available (closed_contracts table).
     realized = 0.0
@@ -1164,7 +1182,7 @@ async def api_today_pnl(request: Request, project_id: str):
                 # Fall back to the misleading-but-non-crashing math
                 unrealized = total_change - realized
             pct = (total_change / last_equity * 100) if last_equity else None
-            return {
+            resp = {
                 "project_id":  project_id,
                 "today_realized":   round(realized, 2),
                 "today_unrealized": round(unrealized, 2),
@@ -1173,6 +1191,8 @@ async def api_today_pnl(request: Request, project_id: str):
                 "equity":           round(equity, 2),
                 "source":           "broker_equity_delta",
             }
+            _TODAY_PNL_CACHE[project_id] = (_time.monotonic(), resp)
+            return resp
     except BrokerReauthRequired:
         return {
             "project_id":       project_id,
@@ -3152,10 +3172,16 @@ async def api_pnl_report(request: Request, project_id: str,
         starting_equity = budget
         starting_source = "max_equity_allocation"
 
+    # % gain must reflect broker-truth account P&L (equity delta), NOT gross
+    # option premium — otherwise it reads +38% while the account is down.
+    _cur_eq_pct = summary.get("current_equity")
+    _net_for_pct = ((float(_cur_eq_pct) - float(starting_equity))
+                    if _cur_eq_pct is not None and starting_equity
+                    else total_pnl)
     pct_gain = None
     annualized_pct = None
     if starting_equity and starting_equity > 0:
-        pct_gain = round(total_pnl / starting_equity * 100, 2)
+        pct_gain = round(_net_for_pct / starting_equity * 100, 2)
         # Annualize when the period is > 14 days. Below that the figure
         # is more noise than signal (one good week extrapolates to an
         # absurd APR).
@@ -3167,9 +3193,27 @@ async def api_pnl_report(request: Request, project_id: str,
             except Exception:
                 annualized_pct = None
 
+    # Broker-truth net account P&L = current equity − equity at period start.
+    # This is the ONLY figure that reconciles to the Alpaca account. The
+    # realized/option_pnl below is GROSS option premium (premium − close
+    # cost) and does NOT include assignment/stock losses, so it can read very
+    # positive while the account is actually down. account_net_pnl is the
+    # headline; option premium is shown as a clearly-labeled secondary.
+    _cur_eq = summary.get("current_equity")
+    account_net_pnl = None
+    account_net_pnl_pct = None
+    if _cur_eq is not None and starting_equity:
+        account_net_pnl = round(float(_cur_eq) - float(starting_equity), 2)
+        if float(starting_equity) > 0:
+            account_net_pnl_pct = round(
+                account_net_pnl / float(starting_equity) * 100, 2)
+
     period_summary = {
         "from": fd.isoformat(),
         "to": td.isoformat(),
+        "account_net_pnl": account_net_pnl,
+        "account_net_pnl_pct": account_net_pnl_pct,
+        "gross_option_realized": round(sum(pnl_values), 2),
         "realized_pnl": round(total_pnl, 2),
         "option_pnl": round(sum(pnl_values), 2),
         "stock_pnl": round(stock_pnl, 2),

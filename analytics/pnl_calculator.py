@@ -128,9 +128,42 @@ def metrics_summary(project_id: str, period: str = "all") -> dict[str, Any]:
 
     latest_snap = PortfolioSnapshotsRepo.latest(project_id)
 
+    # Broker-truth net account P&L = current equity − equity at the start of
+    # the period. This is the ONLY P&L number that reconciles to the broker
+    # (Alpaca) account. The `realized_pnl` above is gross option premium
+    # (premium − close_cost) and does NOT subtract assignment/stock losses —
+    # an assigned put is booked as a full premium "win" while the resulting
+    # stock loss is never recorded here, so realized_pnl can read wildly
+    # positive while the account is actually down. Surface account_net_pnl as
+    # the headline everywhere a user reads "profit". curve[0] is the earliest
+    # snapshot in the period (earliest-ever for period="all").
+    starting_equity = None
+    if curve:
+        starting_equity = curve[0].get("equity")
+    if starting_equity is None:
+        starting_equity = (
+            PortfolioSnapshotsRepo.earliest(project_id) or {}).get("equity")
+    current_equity = (latest_snap or {}).get("equity")
+    account_net_pnl = None
+    account_net_pnl_pct = None
+    if current_equity is not None and starting_equity:
+        account_net_pnl = round(
+            float(current_equity) - float(starting_equity), 2)
+        if float(starting_equity) > 0:
+            account_net_pnl_pct = round(
+                account_net_pnl / float(starting_equity) * 100, 2)
+
     return {
         "period": period,
         "since": since.isoformat(),
+        # Broker-reconciled truth (headline). See note above.
+        "account_net_pnl": account_net_pnl,
+        "account_net_pnl_pct": account_net_pnl_pct,
+        "starting_equity": (round(float(starting_equity), 2)
+                            if starting_equity else None),
+        # Gross option premium realized (premium − close_cost). NOT net of
+        # assignment/stock losses — kept for premium-capture analysis only.
+        "gross_option_realized": round(total_pnl, 2),
         "realized_pnl": round(total_pnl, 2),
         "total_premium_captured": round(total_premium, 2),
         "trade_count": trade_count,

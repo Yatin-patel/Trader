@@ -443,6 +443,20 @@ def _check_watchlist_fits_bp(
     except Exception:
         return None
 
+    # If the account already holds open positions, a low *remaining*
+    # options BP is EXPECTED — the capital is committed to the open book,
+    # not evidence the watchlist is misconfigured. Judging watchlist fit
+    # against leftover BP here would (a) raise a false "doesn't fit BP"
+    # alarm every cycle and (b) risk churning the watchlist away from the
+    # very names we're actively holding. A deployed wheel is healthy:
+    # leave it alone. (This is why Yatin-Minimum, fully deployed in
+    # NIO/SNAP puts, must NOT be told its NIO/SNAP watchlist "doesn't fit".)
+    try:
+        if client.list_positions():
+            return None
+    except Exception:
+        pass
+
     options_bp = float(account.get("options_buying_power") or 0)
     if options_bp <= 0:
         # Fall back to cash buying power — some brokers don't split it
@@ -508,19 +522,51 @@ def _check_watchlist_fits_bp(
     # tickers that actually fit, and align scanner_max_price.
     new_watchlist = ",".join(kept) if kept else ""
     if not new_watchlist:
-        # Nothing in the watchlist fits — surface advisory; we don't
-        # want to silently swap in a random cheap watchlist.
+        # Book is flat (we returned early above if any positions exist)
+        # and not one watchlist name fits the available BP. Don't punt to
+        # the user with a "click Optimize Now" advisory — self-heal it by
+        # building a BP-aware watchlist from the dynamic generator (the
+        # same engine the Optimize-Now button uses) and installing it.
+        try:
+            from watchlists.dynamic import refresh_watchlist
+            res = refresh_watchlist(project_id, force=True)
+        except Exception:
+            logger.exception("auto watchlist rebuild failed for %s",
+                             project_id)
+            res = {"status": "error"}
+        if res.get("status") == "refreshed":
+            return {
+                "auto_applied": {
+                    "key":    "watchlist",
+                    "old":    watchlist,
+                    "new":    (ProjectSettings.get(
+                        project_id, "watchlist", default="") or ""),
+                    "reason": (
+                        f"None of the prior watchlist names fit the "
+                        f"account's options BP (${options_bp:,.0f}) from a "
+                        f"flat book. Auto-rebuilt a BP-aware watchlist "
+                        f"({res.get('count')} names) via the dynamic "
+                        f"generator so the project can trade without "
+                        f"waiting for manual action."
+                    ),
+                },
+            }
+        # Even the BP-aware generator found nothing tradeable: this is a
+        # capital constraint, not a config one — no autonomous fix exists.
+        # Surface it honestly so the dashboard shows the real blocker.
         return {
             "advisory": {
-                "issue": "watchlist_entirely_too_expensive",
+                "issue": "account_too_small_to_trade",
                 "narrative": (
-                    f"None of the {len(syms)} watchlist tickers fits "
-                    f"in current options BP (${options_bp:,.0f}). "
-                    f"Project can't open any CSPs as configured."
+                    f"Options buying power (${options_bp:,.0f}) is too "
+                    f"small to sell even one cash-secured put on any "
+                    f"liquid optionable name, and the book is flat. No "
+                    f"setting change fixes this."
                 ),
                 "suggested_fix": (
-                    "Click Optimize Now — it'll pick a tier-correct "
-                    "watchlist of names that fit the account size."
+                    "Add funds, or switch strategy_mode to one that "
+                    "doesn't require full CSP collateral (e.g. a debit "
+                    "spread)."
                 ),
             },
         }

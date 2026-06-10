@@ -48,9 +48,15 @@
     try {
       const r = await fetch(`/api/projects/${enc}/performance/summary?period=${period}`);
       const s = await r.json();
-      els.realized.textContent = fmtMoney(s.realized_pnl, { sign: true });
-      els.realized.className = "card-value " + colorPL(s.realized_pnl);
-      els.rsub.textContent = `${s.trade_count} closed · since ${s.since?.slice(0, 10)}`;
+      // Headline = broker-truth net account P&L (matches Alpaca). The gross
+      // option premium (s.gross_option_realized) is shown in the sub line,
+      // clearly labeled, because it excludes assignment/stock losses.
+      const net = s.account_net_pnl != null ? s.account_net_pnl : s.realized_pnl;
+      els.realized.textContent = fmtMoney(net, { sign: true });
+      els.realized.className = "card-value " + colorPL(net);
+      els.rsub.textContent =
+        `gross premium ${fmtMoney(s.gross_option_realized, { sign: true })} · ` +
+        `${s.trade_count} closed`;
       els.unreal.textContent = fmtMoney(s.unrealized_pnl, { sign: true });
       els.unreal.className = "card-value " + colorPL(s.unrealized_pnl);
       els.winrate.textContent = fmtPct(s.win_rate);

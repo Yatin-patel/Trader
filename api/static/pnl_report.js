@@ -59,10 +59,14 @@
   function applyReport(data) {
     const s = data.summary || {};
     const realEl = document.getElementById("card-realized");
-    realEl.textContent = fmtMoney(s.realized_pnl);
-    realEl.className = "card-value " + cls(s.realized_pnl);
+    // Headline = broker-truth net account P&L (matches Alpaca). Gross option
+    // premium (excludes assignment/stock losses) is shown in the sub line.
+    const net = s.account_net_pnl != null ? s.account_net_pnl : s.realized_pnl;
+    realEl.textContent = fmtMoney(net);
+    realEl.className = "card-value " + cls(net);
     document.getElementById("card-realized-sub").textContent =
-      `options ${fmtMoney(s.option_pnl)} · stock ${fmtMoney(s.stock_pnl)}`;
+      `gross option premium ${fmtMoney(s.gross_option_realized)} ` +
+      `(excl. assignment/stock losses)`;
 
     // % gain on capital
     const pgEl = document.getElementById("card-pct-gain");
