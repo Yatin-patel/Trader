@@ -1,0 +1,8 @@
+[Unit]
+Description=Trader health watchdog (auto-heal + alert)
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/var/www/trader
+ExecStart=/var/www/trader/.venv/bin/python /var/www/trader/ops/watchdog.py
