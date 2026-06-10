@@ -50,7 +50,7 @@
       <div class="card-sub muted" id="card-pct-gain-sub"></div>
     </div>
     <div class="card">
-      <div class="card-label">Premium Captured</div>
+      <div class="card-label" title="Gross option premium SOLD over the period. This is not money kept — assignment and stock losses are not deducted. Your actual result is Net P&amp;L (account).">Premium Sold (gross)</div>
       <div class="card-value" id="card-premium">—</div>
     </div>
     <div class="card">
@@ -67,7 +67,7 @@
       <div class="card-sub muted" id="card-fees-sub">from broker activity feed</div>
     </div>
     <div class="card">
-      <div class="card-label">Net P&amp;L (after fees)</div>
+      <div class="card-label" title="Gross option premium realized minus brokerage fees. This is NOT your account profit — it ignores assignment/stock losses. Trust Net P&amp;L (account).">Premium − fees (gross)</div>
       <div class="card-value" id="card-net">—</div>
       <div class="card-sub muted" id="card-net-sub"></div>
     </div>
@@ -177,5 +177,5 @@
   }
 </style>
 
-<script src="/static/pnl_report.js?v=3"></script>
+<script src="/static/pnl_report.js?v=4"></script>
 {% endblock %}

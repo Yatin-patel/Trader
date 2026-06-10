@@ -116,7 +116,7 @@
           sub.textContent =
             "preliminary — excludes pending fee sync";
         } else {
-          sub.textContent = "realized P&L − brokerage fees";
+          sub.textContent = "gross option premium − fees · not account P&L";
         }
       }
     }
