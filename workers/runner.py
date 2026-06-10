@@ -136,8 +136,15 @@ class MultiTenantRunner:
                         continue
                     try:
                         from ops.reconciliation import run_reconciliation
+                        # deep_sync so the recurring reconcile keeps the DB
+                        # ALWAYS in sync with the broker — not just presence
+                        # (light) but qty / long-vs-short mismatches AND
+                        # auto-import of untracked broker shorts. auto_sync is
+                        # read from the project's reconcile_auto_sync setting
+                        # inside run_reconciliation.
                         await asyncio.to_thread(run_reconciliation,
-                                                proj.project_id)
+                                                proj.project_id,
+                                                deep_sync=True)
                         self._last_recon_run[proj.project_id] = now
                     except Exception as ex:
                         logger.exception("reconcile failed for %s: %s",
