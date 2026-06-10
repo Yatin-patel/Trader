@@ -101,6 +101,19 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Autonomous Trader", lifespan=lifespan)
 app.include_router(chat_router)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.middleware("http")
+async def _static_cache_headers(request: Request, call_next):
+    """Force browsers to revalidate /static assets on every load. The etag /
+    last-modified already present make this a cheap 304 when unchanged, but it
+    guarantees a deployed JS/CSS change is picked up WITHOUT a manual hard
+    refresh. We were burned by browsers serving stale dashboard JS that kept
+    rendering the old gross-premium 'profit' number after the fix shipped."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
