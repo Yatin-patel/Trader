@@ -75,7 +75,14 @@ def _trading_days(client: BrokerClient) -> set[str]:
         days = {str(c.get("date")) for c in cal if c.get("date")}
     except Exception:
         days = set()
-    _CAL_CACHE[key] = (now, days)
+    # Only cache a SUCCESSFUL, non-empty fetch. A transient get_calendar
+    # failure returns an empty set; caching that for the 6h TTL would make
+    # _in_extended_hours_window() return False for hours, so the worker
+    # treats all of pre-/after-market as "market_closed" and skips every
+    # cycle until restart. Not caching empty means the next loop (~5 min)
+    # retries and recovers on its own.
+    if days:
+        _CAL_CACHE[key] = (now, days)
     return days
 
 
